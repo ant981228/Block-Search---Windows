@@ -397,6 +397,10 @@ class HelpDialog(QDialog):
                 <td>Toggle between paste modes (cursor/end)</td>
             </tr>
             <tr>
+                <td><b>Ctrl+Shift+P</b></td>
+                <td>Toggle including path names in search</td>
+            </tr>
+            <tr>
                 <td><b>Alt+F4, Ctrl+Q</b></td>
                 <td>Quit application</td>
             </tr>
@@ -2014,7 +2018,7 @@ class ShortcutDialog(QDialog):
     
     def __init__(self, current_shortcut: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configure Shortcut")
+        self.setWindowTitle("Set Window Focus Shortcut")
         self.setModal(True)
         
         # Store the shortcut in keyboard library format
@@ -2966,7 +2970,7 @@ class DocumentSearcher:
             
         return None, query.strip()
 
-    def search(self, query: str, sort_key: str = None, reverse: bool = False) -> List[DocumentInfo]:
+    def search(self, query: str, sort_key: str = None, reverse: bool = False, include_path: bool = False) -> List[DocumentInfo]:
         """
         Perform sophisticated multi-token search with optional sorting and prefix filtering.
         
@@ -2974,6 +2978,7 @@ class DocumentSearcher:
             query: Space-separated search terms, optionally starting with prefix
             sort_key: Optional key for sorting ('name', 'modified', 'created', 'size')
             reverse: Whether to reverse the sort order
+            include_path: Whether to include path name in search text
             
         Returns:
             List of matching DocumentInfo objects, sorted if requested
@@ -3018,8 +3023,13 @@ class DocumentSearcher:
             elif self.prefix_manager.is_folder_excluded(doc.relative_path):
                 continue
                 
+            # Determine what text to search in - either just filename or filename+path
+            search_text = doc.search_name
+            if include_path and doc.relative_path:
+                search_text = f"{search_text} {doc.relative_path.lower()}"
+                
             # Check if all tokens match
-            if all(token in doc.search_name for token in search_tokens):
+            if all(token in search_text for token in search_tokens):
                 results.append(doc)
 
         return self._sort_results(results, sort_key, reverse)
@@ -3510,7 +3520,15 @@ class DocxSearchApp(QMainWindow):
         
         # Add Configure Shortcut option to Settings menu
         settings_menu.addSeparator()
-        configure_shortcut_action = settings_menu.addAction('Configure Shortcut...')
+        
+        # Add option to include path names in search
+        self.include_path_action = settings_menu.addAction('Include Path in Search')
+        self.include_path_action.setCheckable(True)
+        self.include_path_action.setChecked(self.settings.value('include_path_in_search', False, type=bool))
+        self.include_path_action.setShortcut('Ctrl+Shift+P')  # Add keyboard shortcut
+        self.include_path_action.triggered.connect(self.toggle_include_path)
+        
+        configure_shortcut_action = settings_menu.addAction('Set Window Focus Shortcut...')
         configure_shortcut_action.triggered.connect(self.configure_shortcut)
         
         # Add Prefix Configuration submenu
@@ -3663,9 +3681,18 @@ class DocxSearchApp(QMainWindow):
         # Update the menu labels to reflect the new keyboard shortcuts
         self._update_paste_mode_shortcuts()
         
-        # Update status bar to show the change
-        current_mode = "Cursor" if self.cursor_mode_action.isChecked() else "Document End"
-        self.statusBar().showMessage(f"Paste mode switched to: {current_mode}", 3000)
+    def toggle_include_path(self):
+        """Toggle whether path names are included in search terms."""
+        include_path = self.include_path_action.isChecked()
+        self.settings.setValue('include_path_in_search', include_path)
+        
+        # Show status message
+        status = "enabled" if include_path else "disabled"
+        self.statusBar().showMessage(f"Path name search {status} (Ctrl+Shift+P)", 3000)
+        
+        # Re-run search with new setting if search box has content
+        if self.search_input.text():
+            self.perform_search()
 
     def on_item_activated(self, item: QListWidgetItem):
         """Handle document selection using current default paste mode."""
@@ -3970,8 +3997,11 @@ class DocxSearchApp(QMainWindow):
         
         reverse = self.reverse_sort_action.isChecked()
         
+        # Get include_path setting
+        include_path = self.include_path_action.isChecked()
+        
         # Perform search with current parameters
-        results = self.searcher.search(query, sort_key, reverse)
+        results = self.searcher.search(query, sort_key, reverse, include_path)
         
         # Efficiently populate results with intelligent selection management
         selection_restored = False
