@@ -112,6 +112,10 @@ class DocumentInfo:
         size: File size in bytes
         search_name: Lowercase name for efficient search operations
         relative_path: Path relative to search root for folder display
+        original_doc_path: Path to the original source document (if split from larger doc)
+        position_in_original: Position/index in the original document
+        parent_doc_name: Name of the parent document (if applicable)
+        sibling_docs: List of sibling document names in document order
     """
     path: Path
     name: str
@@ -120,6 +124,10 @@ class DocumentInfo:
     size: int
     search_name: str = ""
     relative_path: str = ""
+    original_doc_path: Optional[str] = None
+    position_in_original: Optional[int] = None
+    parent_doc_name: Optional[str] = None
+    sibling_docs: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         """Initialize derived attributes for optimized search operations."""
@@ -419,6 +427,14 @@ class HelpDialog(QDialog):
             <tr>
                 <td><b>Ctrl+Enter</b></td>
                 <td>Select document (use alternate paste mode)</td>
+            </tr>
+            <tr>
+                <td><b>Left Arrow</b></td>
+                <td>Show document in its original context</td>
+            </tr>
+            <tr>
+                <td><b>Right Arrow</b></td>
+                <td>Return from context view to search results</td>
             </tr>
             <tr>
                 <td><b>F1</b></td>
@@ -1030,6 +1046,62 @@ class DocxSplitter:
         else:
             return self._save_individual_files(output_dir, preserve_hierarchy)
     
+    def _add_document_metadata(self, doc: Document, section: Section, all_sections: List[Section]) -> None:
+        """
+        Add hierarchy metadata to document custom properties.
+        
+        Args:
+            doc: Document to add metadata to
+            section: Current section being processed
+            all_sections: All sections in the document for sibling relationships
+        """
+        try:
+            # Create metadata dictionary
+            metadata = {
+                "original_doc_path": str(self.input_path),
+                "position_in_original": section.start_index,
+                "section_level": section.level,
+                "section_title": section.title,
+            }
+            
+            # Add parent info if available
+            if section.parent:
+                metadata["parent_doc_name"] = section.parent.safe_title
+            
+            # Find all sections with the same parent (or no parent) and at the same level
+            siblings = []
+            for s in all_sections:
+                if s.level == section.level:
+                    if (section.parent is None and s.parent is None) or \
+                       (section.parent is not None and s.parent is not None and 
+                        section.parent.safe_title == s.parent.safe_title):
+                        siblings.append(s)
+            
+            # Sort siblings by position in document
+            siblings.sort(key=lambda s: s.start_index)
+            
+            # Store sibling names (excluding self)
+            metadata["sibling_docs"] = [s.safe_title for s in siblings if s.safe_title != section.safe_title]
+            
+            # Still try to add some core properties for backward compatibility,
+            # but keep them short to avoid exceeding limits
+            core_props = doc.core_properties
+            try:
+                # Try to add minimal metadata to the document properties
+                core_props.identifier = "Original: " + Path(self.input_path).name
+                core_props.category = f"position:{section.start_index}"
+                if section.parent:
+                    core_props.subject = f"parent:{section.parent.safe_title[:50]}" if section.parent.safe_title else ""
+            except Exception as e:
+                print(f"Warning: Could not add core properties: {e}")
+                
+            # Return the metadata - it will be saved to a separate file by the caller
+            return metadata
+                
+        except Exception as e:
+            print(f"Error creating metadata: {e}")
+            return None
+    
     def _create_section_document(self, section: Section) -> Document:
         """
         Create new document from section content using template.
@@ -1159,6 +1231,38 @@ class DocxSplitter:
                     target_run.font.highlight_color = source_run.font.highlight_color
         except Exception as e:
             print(f"Could not copy highlight color: {e}")
+            
+        # Handle background color/shading using XML (for non-highlight background colors)
+        try:
+            # Import here to avoid dependencies at module level
+            from docx.oxml.ns import qn
+            
+            # Get XML elements
+            source_element = source_run._element
+            target_element = target_run._element
+            
+            # Look for shading in source run's properties
+            source_props = source_element.get_or_add_rPr()
+            source_shd = source_props.find(qn('w:shd'))
+            
+            if source_shd is not None:
+                # Source has custom background shading
+                # Get target run properties
+                target_props = target_element.get_or_add_rPr()
+                
+                # Check if target already has shading
+                target_shd = target_props.find(qn('w:shd'))
+                
+                # If target already has shading, remove it (we'll copy the new one)
+                if target_shd is not None:
+                    target_props.remove(target_shd)
+                    
+                # Copy the shading properties from source to target
+                from copy import deepcopy
+                new_shd = deepcopy(source_shd)
+                target_props.append(new_shd)
+        except Exception as e:
+            print(f"Could not copy background shading: {e}")
     
     def _copy_paragraph_properties(self, source_para, target_para) -> None:
         """
@@ -1226,6 +1330,17 @@ class DocxSplitter:
                         # Create document for section
                         doc = self._create_section_document(section)
                         
+                        # Add hierarchy metadata and get metadata dict
+                        metadata = self._add_document_metadata(doc, section, self.sections)
+                        
+                        # Create a separate metadata file
+                        if metadata:
+                            import json
+                            # Save metadata to a JSON file with the same name + .meta.json
+                            meta_file = temp_path / f"{section.safe_title}.meta.json"
+                            with open(meta_file, 'w', encoding='utf-8') as f:
+                                json.dump(metadata, f, indent=2)
+                        
                         # Determine path within zip based on hierarchy option
                         if preserve_hierarchy and section.parent:
                             # Get folder structure from parent hierarchy
@@ -1251,6 +1366,12 @@ class DocxSplitter:
                         
                         # Add to archive with proper path
                         archive.write(temp_file, archive_path)
+                        
+                        # Add metadata file to archive if it exists
+                        meta_file = temp_path / f"{section.safe_title}.meta.json"
+                        if meta_file.exists():
+                            meta_archive_path = archive_path + ".meta.json"
+                            archive.write(meta_file, meta_archive_path)
                         
                         # Report progress
                         percent_complete = int((idx / total_sections) * 100)
@@ -1282,6 +1403,29 @@ class DocxSplitter:
             try:
                 # Create document for section
                 doc = self._create_section_document(section)
+                
+                # Add hierarchy metadata and get metadata dict
+                metadata = self._add_document_metadata(doc, section, self.sections)
+                
+                # Create a separate metadata file
+                if metadata:
+                    import json
+                    # Save metadata to a JSON file with the same name + .meta.json
+                    meta_file_path = output_dir / f"{section.safe_title}.meta.json"
+                    if preserve_hierarchy and section.parent is not None:
+                        # Adjust path for hierarchical structure
+                        folder_components = section.get_path_components()
+                        section_dir = output_dir
+                        for component in folder_components:
+                            section_dir = section_dir / component
+                        meta_file_path = section_dir / f"{section.safe_title}.meta.json"
+                        
+                    # Make sure parent directory exists
+                    meta_file_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save metadata to file
+                    with open(meta_file_path, 'w', encoding='utf-8') as f:
+                        json.dump(metadata, f, indent=2)
                 
                 # Determine output path based on hierarchy option
                 if preserve_hierarchy and section.parent is not None:
@@ -2179,6 +2323,11 @@ class SearchResultItem(QListWidgetItem):
             f"Size: {self.doc_info.size:,} bytes\n"
             f"Modified: {datetime.fromtimestamp(self.doc_info.last_modified).strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        
+        # Add hierarchy info to tooltip if available
+        if hasattr(self.doc_info, 'original_doc_path') and self.doc_info.original_doc_path:
+            tooltip += f"\nFrom document: {Path(self.doc_info.original_doc_path).name}"
+            
         self.setToolTip(tooltip)
 
 class SearchInputWithKeyNavigation(QLineEdit):
@@ -2259,8 +2408,27 @@ class SearchInputWithKeyNavigation(QLineEdit):
             return
             
         if event.key() in self.navigation_keys:
-            # Forward the event to the results list
+            # Forward the event to the results list and transfer focus
             self.results_list.setFocus()
+            
+            # For Down key, just focus the current selection in the results list
+            if event.key() == Qt.Key.Key_Down and self.results_list.count() > 0:
+                # If there's no current item, select the first one
+                if self.results_list.currentRow() == -1:
+                    self.results_list.setCurrentRow(0)
+                
+                # Make sure the item is visible
+                if self.results_list.currentItem():
+                    self.results_list.scrollToItem(
+                        self.results_list.currentItem(),
+                        QListWidget.ScrollHint.EnsureVisible
+                    )
+                
+                # Event has been handled
+                event.accept()
+                return
+            
+            # For other navigation keys, forward the event
             new_event = QKeyEvent(
                 QEvent.Type.KeyPress,
                 event.key(),
@@ -2270,8 +2438,7 @@ class SearchInputWithKeyNavigation(QLineEdit):
                 event.count()
             )
             self.results_list.keyPressEvent(new_event)
-            # Return focus to search input for continued typing
-            self.setFocus()
+            # Do not return focus to search input - we want to keep focus on the results list
         else:
             # Handle all other keys normally
             super().keyPressEvent(event)
@@ -2591,24 +2758,80 @@ class PrefixManagerDialog(QDialog):
         
         super().accept()
 
-class EnhancedResultsList(QListWidget):
+class DocumentContextList(QListWidget):
     """
-    Enhanced list widget that handles Ctrl+Enter for alternate paste mode.
+    List widget for displaying document context (related documents from the same source).
     """
-    ctrlEnterPressed = pyqtSignal(QListWidgetItem)
+    itemActivated = pyqtSignal(QListWidgetItem)  # Standard activation (Enter key)
+    ctrlEnterPressed = pyqtSignal(QListWidgetItem)  # For alternate paste mode
+    closeContextView = pyqtSignal()  # Signal to close the context view (Right arrow)
     
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        """Handle key press events with special handling for Ctrl+Enter."""
-        # Handle Ctrl+Enter on list items
-        if ((event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and 
-            event.modifiers() == Qt.KeyboardModifier.ControlModifier):
-            print("Ctrl+Enter detected in list")
+        """Handle key press events with special handling for navigation."""
+        # Handle standard activation with Enter
+        if (event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            current_item = self.currentItem()
+            if current_item:
+                self.itemActivated.emit(current_item)
+                event.accept()
+                return
+                
+        # Handle Ctrl+Enter for alternate paste mode
+        elif ((event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and 
+              event.modifiers() == Qt.KeyboardModifier.ControlModifier):
             current_item = self.currentItem()
             if current_item:
                 self.ctrlEnterPressed.emit(current_item)
                 event.accept()
                 return
         
+        # Handle Right arrow to exit context view
+        elif event.key() == Qt.Key.Key_Right and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            self.closeContextView.emit()
+            event.accept()
+            return
+            
+        # Handle all other keys normally
+        super().keyPressEvent(event)
+
+class EnhancedResultsList(QListWidget):
+    """
+    Enhanced list widget that handles Ctrl+Enter for alternate paste mode
+    and Left arrow for showing document context.
+    """
+    ctrlEnterPressed = pyqtSignal(QListWidgetItem)
+    showDocumentContext = pyqtSignal(DocumentInfo)  # New signal for context view
+    focusSearchInput = pyqtSignal()  # Signal to request focus back to search input
+    
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Handle key press events with special handling for navigation."""
+        # Handle Ctrl+Enter for alternate paste mode
+        if ((event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and 
+            event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+            current_item = self.currentItem()
+            if current_item:
+                self.ctrlEnterPressed.emit(current_item)
+                event.accept()
+                return
+        
+        # Handle Left arrow for showing document context
+        elif event.key() == Qt.Key.Key_Left and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            current_item = self.currentItem()
+            if current_item and hasattr(current_item, 'doc_info'):
+                self.showDocumentContext.emit(current_item.doc_info)
+                event.accept()
+                return
+        
+        # Handle Up key when at the first item - return focus to search input
+        elif event.key() == Qt.Key.Key_Up and self.currentRow() == 0:
+            self.focusSearchInput.emit()  # Request focus back to search input
+            event.accept()
+            return
+                
         # Handle all other keys normally
         super().keyPressEvent(event)
 
@@ -2929,7 +3152,8 @@ class DocumentSearcher:
                     if rel_path == '.':
                         rel_path = ''
                     
-                    self.document_index[file_path.stem.lower()] = DocumentInfo(
+                    # Create basic document info
+                    doc_info = DocumentInfo(
                         path=file_path,
                         name=file_path.name,
                         last_modified=stats.st_mtime,
@@ -2937,6 +3161,70 @@ class DocumentSearcher:
                         size=stats.st_size,
                         relative_path=rel_path
                     )
+                    
+                    # Try to read hierarchy metadata if it exists
+                    try:
+                        # First check for metadata JSON file
+                        meta_file_path = file_path.with_suffix('.docx.meta.json')
+                        if not meta_file_path.exists():
+                            # Try alternative name format
+                            meta_file_path = file_path.with_suffix('.meta.json')
+                        
+                        if meta_file_path.exists():
+                            # Read metadata from JSON file
+                            import json
+                            with open(meta_file_path, 'r', encoding='utf-8') as f:
+                                metadata = json.load(f)
+                                
+                            # Apply metadata to document info
+                            if 'original_doc_path' in metadata:
+                                doc_info.original_doc_path = metadata['original_doc_path']
+                                
+                            if 'position_in_original' in metadata:
+                                doc_info.position_in_original = metadata['position_in_original']
+                                
+                            if 'parent_doc_name' in metadata:
+                                doc_info.parent_doc_name = metadata['parent_doc_name']
+                                
+                            if 'sibling_docs' in metadata:
+                                doc_info.sibling_docs = metadata['sibling_docs']
+                            
+                        # Fallback to document properties if no metadata file found
+                        elif file_path.suffix.lower() == '.docx':
+                            doc = docx.Document(file_path)
+                            core_props = doc.core_properties
+                            
+                            # Get original document path
+                            if hasattr(core_props, 'identifier') and core_props.identifier:
+                                doc_info.original_doc_path = core_props.identifier
+                            
+                            # Get position in original document
+                            if hasattr(core_props, 'category') and core_props.category and core_props.category.startswith('position:'):
+                                try:
+                                    doc_info.position_in_original = int(core_props.category.split(':')[1])
+                                except (ValueError, IndexError):
+                                    pass
+                            
+                            # Get parent document info
+                            if hasattr(core_props, 'subject') and core_props.subject and core_props.subject.startswith('parent:'):
+                                try:
+                                    doc_info.parent_doc_name = core_props.subject.split(':')[1]
+                                except IndexError:
+                                    pass
+                            
+                            # Get sibling documents
+                            if hasattr(core_props, 'comments') and core_props.comments:
+                                try:
+                                    import json
+                                    doc_info.sibling_docs = json.loads(core_props.comments)
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                                    
+                    except Exception as e:
+                        print(f"Error reading document metadata for {file_path}: {e}")
+                    
+                    # Add to index
+                    self.document_index[file_path.stem.lower()] = doc_info
                 except (PermissionError, FileNotFoundError) as e:
                     print(f"Error accessing {file_path}: {e}")
                 
@@ -3034,6 +3322,57 @@ class DocumentSearcher:
 
         return self._sort_results(results, sort_key, reverse)
 
+    def get_document_context(self, doc_info: DocumentInfo) -> List[DocumentInfo]:
+        """
+        Get the document in its original context, with siblings in proper order.
+        
+        Args:
+            doc_info: The document to get context for
+            
+        Returns:
+            List of related documents in original document order
+        """
+        related_docs = []
+        
+        # If no hierarchy information, just return the document itself
+        if not doc_info.original_doc_path and not doc_info.sibling_docs:
+            return [doc_info]
+            
+        # Add current document
+        related_docs.append(doc_info)
+        
+        # Add sibling documents if available
+        for sibling_name in doc_info.sibling_docs:
+            # Look for sibling in the index
+            sibling_key = sibling_name.lower()
+            if sibling_key in self.document_index:
+                related_docs.append(self.document_index[sibling_key])
+                
+        # If we have a parent document, add it too
+        if doc_info.parent_doc_name:
+            parent_key = doc_info.parent_doc_name.lower()
+            if parent_key in self.document_index:
+                # Insert parent at the beginning
+                related_docs.insert(0, self.document_index[parent_key])
+                
+        # Sort by position in original document if available
+        # Group documents by levels (parent first, then siblings in order)
+        # First, sort by whether it's a parent or not
+        related_docs.sort(key=lambda d: 0 if d.parent_doc_name else 1)
+        
+        # Then sort siblings by position
+        sorted_docs = []
+        # First add parent documents (already at the beginning due to previous sort)
+        parent_docs = [d for d in related_docs if not d.parent_doc_name]
+        sorted_docs.extend(parent_docs)
+        
+        # Then add child documents sorted by position
+        child_docs = [d for d in related_docs if d.parent_doc_name]
+        child_docs.sort(key=lambda d: d.position_in_original if d.position_in_original is not None else float('inf'))
+        sorted_docs.extend(child_docs)
+        
+        return sorted_docs
+        
     def _sort_results(
         self,
         results: List[DocumentInfo],
@@ -3342,6 +3681,10 @@ class DocxSearchApp(QMainWindow):
 
     def focus_search(self):
         """Focus search field with intelligent text selection."""
+        # Close context view if it's open
+        if self.context_frame.isVisible():
+            self.close_document_context()
+            
         self.search_input.setFocus()
         self.search_input.selectAll()
     
@@ -3383,7 +3726,11 @@ class DocxSearchApp(QMainWindow):
         # Target status panel with visual hierarchy
         target_frame = QFrame()
         target_frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Sunken)
+        # Set fixed height for target frame to prevent it from expanding too much
+        target_frame.setFixedHeight(40)  # Fixed height in pixels
         target_layout = QHBoxLayout(target_frame)
+        # Reduce margins to make the layout more compact
+        target_layout.setContentsMargins(5, 3, 5, 3)
         
         target_label = QLabel("Target Document:")
         self.target_status = QLineEdit()
@@ -3397,11 +3744,64 @@ class DocxSearchApp(QMainWindow):
         search_frame = QFrame()
         search_layout = QVBoxLayout(search_frame)
         
+        # Create a horizontal splitter to hold search results and context panel
+        self.search_splitter = QSplitter(Qt.Orientation.Horizontal)
+        
         # Initialize results list using our enhanced version
         self.results_list = EnhancedResultsList()
         self.results_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Connect signals
         self.results_list.itemActivated.connect(self.on_item_activated)
         self.results_list.ctrlEnterPressed.connect(self.on_ctrl_enter_activated)
+        self.results_list.showDocumentContext.connect(self.show_document_context)
+        self.results_list.focusSearchInput.connect(self.focus_search)
+        
+        # Create context panel (initially hidden)
+        self.context_frame = QFrame()
+        self.context_frame.setVisible(False)  # Hidden by default
+        context_layout = QVBoxLayout(self.context_frame)
+        
+        # Create header for context view
+        context_header = QFrame()
+        context_header_layout = QHBoxLayout(context_header)
+        context_header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.context_title = QLabel("Document Context View")
+        self.context_title.setStyleSheet("font-weight: bold; color: #2c5aa0;")
+        context_header_layout.addWidget(self.context_title)
+        
+        context_header_layout.addStretch()
+        
+        # Add close button
+        close_context_btn = QPushButton("×")  # Unicode × character
+        close_context_btn.setToolTip("Close context view (Right Arrow)")
+        close_context_btn.setMaximumWidth(30)
+        close_context_btn.clicked.connect(self.close_document_context)
+        context_header_layout.addWidget(close_context_btn)
+        
+        context_layout.addWidget(context_header)
+        
+        # Add document context list
+        self.context_list = DocumentContextList()
+        # Connect activate signal (Enter key)
+        self.context_list.itemActivated.connect(self.on_context_item_activated)
+        # Connect double-click signal explicitly
+        self.context_list.itemDoubleClicked.connect(self.on_context_item_activated)
+        # Connect other signals
+        self.context_list.ctrlEnterPressed.connect(self.on_context_ctrl_enter_activated)
+        self.context_list.closeContextView.connect(self.close_document_context)
+        context_layout.addWidget(self.context_list)
+        
+        # Add preview shortcut (Shift+Enter) to context list
+        context_preview_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Return | Qt.KeyboardModifier.ShiftModifier), self.context_list)
+        context_preview_shortcut.activated.connect(self.show_context_document_preview)
+        
+        # Add context panel and results list to splitter
+        self.search_splitter.addWidget(self.context_frame)
+        self.search_splitter.addWidget(self.results_list)
+        
+        # Set initial sizes (context panel takes less space)
+        self.search_splitter.setSizes([0, 1])  # Context panel starts collapsed
         
         # Create enhanced search input with prefix support
         self.search_input = SearchInputWithKeyNavigation(
@@ -3417,7 +3817,7 @@ class DocxSearchApp(QMainWindow):
         
         # Add components to search layout
         search_layout.addWidget(self.search_input)
-        search_layout.addWidget(self.results_list)
+        search_layout.addWidget(self.search_splitter)
         layout.addWidget(search_frame)
         
         # Initialize status bar for user feedback
@@ -3729,6 +4129,138 @@ class DocxSearchApp(QMainWindow):
             preview_dialog.exec()
         except Exception as e:
             self.statusBar().showMessage(f"Error previewing document: {str(e)}", 5000)
+            
+    def show_context_document_preview(self):
+        """Show preview of the selected document in context view."""
+        item = self.context_list.currentItem()
+            
+        if not item:
+            self.statusBar().showMessage("No document selected to preview", 3000)
+            return
+            
+        file_path = item.data(Qt.ItemDataRole.UserRole)
+        
+        try:
+            # Show preview dialog
+            preview_dialog = DocumentPreviewDialog(file_path, self)
+            preview_dialog.exec()
+        except Exception as e:
+            self.statusBar().showMessage(f"Error previewing document: {str(e)}", 5000)
+            
+    def show_document_context(self, doc_info: DocumentInfo):
+        """Show document in the context of its original document structure."""
+        # Check if document has context information
+        related_docs = self.searcher.get_document_context(doc_info)
+        
+        # If no related documents, just return
+        if len(related_docs) <= 1 and not doc_info.original_doc_path:
+            self.statusBar().showMessage("No document context available", 3000)
+            return
+            
+        # Clear the context list
+        self.context_list.clear()
+        
+        # Get the index of the current document in the related docs list
+        current_index = related_docs.index(doc_info) if doc_info in related_docs else 0
+        
+        # Set document context title
+        if doc_info.original_doc_path:
+            self.context_title.setText(f"Context: {Path(doc_info.original_doc_path).name}")
+        else:
+            self.context_title.setText("Document Context View")
+        
+        # Populate the context list
+        for related_doc in related_docs:
+            # Create item with document info
+            item = QListWidgetItem()
+            item.setText(related_doc.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(related_doc.path))
+            item.setData(Qt.ItemDataRole.UserRole + 1, related_doc)  # Store doc_info
+            
+            # Add visual indicator if it's a parent document
+            if related_doc.parent_doc_name:
+                # Add visual prefix for child documents instead of indent
+                item.setText("  ↪ " + item.text())  # Add arrow and spaces for child docs
+            else:
+                # Make parent docs bold
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                
+            self.context_list.addItem(item)
+        
+        # Select the current document in the context list
+        if 0 <= current_index < self.context_list.count():
+            self.context_list.setCurrentRow(current_index)
+        
+        # Apply visual effects to show context mode
+        self.results_list.setEnabled(False)  # Disable the main results
+        self.results_list.setStyleSheet("QListWidget { background-color: #f0f0f0; color: #808080; }")
+        
+        # Show context frame and give it focus
+        self.context_frame.setVisible(True)
+        
+        # Update splitter sizes for better visibility
+        total_width = self.search_splitter.width()
+        self.search_splitter.setSizes([int(total_width * 0.4), int(total_width * 0.6)])
+        
+        # Give focus to the context list
+        self.context_list.setFocus()
+        
+        # Update status bar
+        self.statusBar().showMessage("Viewing document in context. Use arrow keys to navigate, Enter to select, Right arrow to exit", 5000)
+    
+    def close_document_context(self):
+        """Close the document context view."""
+        # Hide the context frame
+        self.context_frame.setVisible(False)
+        
+        # Reset visual effects
+        self.results_list.setEnabled(True)
+        self.results_list.setStyleSheet("")
+        
+        # Update splitter sizes
+        self.search_splitter.setSizes([0, self.search_splitter.width()])
+        
+        # Return focus to the main results list
+        self.results_list.setFocus()
+        
+        # Update status bar
+        self.statusBar().showMessage("Returned to search results", 3000)
+    
+    def on_context_item_activated(self, item: QListWidgetItem):
+        """Handle item activation from the context list."""
+        # Get document info
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+            
+        # Use regular activation logic - same as on_item_activated
+        use_cursor_mode = self.cursor_mode_action.isChecked()
+        self._process_item(path, use_cursor_mode)
+            
+        # Keep context view open, just show status message
+        self.statusBar().showMessage(f"Document sent to target. Use right arrow to exit context view.", 3000)
+        
+        # Return focus to the context list
+        self.context_list.setFocus()
+    
+    def on_context_ctrl_enter_activated(self, item: QListWidgetItem):
+        """Handle Ctrl+Enter activation from the context list."""
+        # Get document info
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+            
+        # Use alternate paste mode - same as on_ctrl_enter_activated
+        use_cursor_mode = not self.cursor_mode_action.isChecked()
+        self._process_item(path, use_cursor_mode)
+            
+        # Keep context view open, just show status message
+        self.statusBar().showMessage(f"Document sent to target. Use right arrow to exit context view.", 3000)
+        
+        # Return focus to the context list
+        self.context_list.setFocus()
 
     def _process_item(self, file_path: str, use_cursor_mode: bool):
         """Process a document with the specified paste mode."""
@@ -3969,6 +4501,10 @@ class DocxSearchApp(QMainWindow):
     
     def on_search_text_changed(self, text: str):
         """Handle search input changes with intelligent debouncing."""
+        # Close context view if it's open
+        if self.context_frame.isVisible():
+            self.close_document_context()
+            
         self.search_timer.stop()
         self.search_timer.start(self.search_delay)
     
