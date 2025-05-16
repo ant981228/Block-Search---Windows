@@ -657,6 +657,10 @@ class HelpDialog(QDialog):
                 <td>Select document (use alternate paste mode)</td>
             </tr>
             <tr>
+                <td><b>Shift+Enter</b></td>
+                <td>Show document preview</td>
+            </tr>
+            <tr>
                 <td><b>Left Arrow</b></td>
                 <td>Show document in its original context</td>
             </tr>
