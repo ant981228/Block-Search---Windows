@@ -20,11 +20,12 @@ A sophisticated Word document search and content transfer utility designed speci
 - View documents in their original document context
 - Preserved formatting, including highlighting and background colors
 
-### Document Splitting
+### Document Index Management
 - Split large Word documents by heading levels
 - Preserve document hierarchy and relationships
 - Output as individual files or ZIP archive
 - Uses a template system for consistent formatting
+- Queue system for processing multiple documents
 
 ### User Experience
 - Global hotkey activation (default: Ctrl+Space)
@@ -74,12 +75,12 @@ Configure prefixes to limit searches to specific folders:
 Press Left Arrow on any search result to see it in the context of its original document.
 Navigate with Up/Down arrows, select with Enter, and press Right Arrow to return to search.
 
-### Splitting Documents
-1. Open Document Tools → Split Document by Headings
+### Adding Documents to the Index
+1. Open Index → Add Files to Index...
 2. Select input document and template (optional)
 3. Choose heading level to split at and output options
 4. Select output location
-5. Click Process Document
+5. Add to queue and process documents
 
 ## Development
 
