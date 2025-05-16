@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-Advanced Word Document Search and Content Transfer Utility
-
-Provides sophisticated document searching capabilities with support for both clipboard 
-operations and direct content transfer between documents, including intelligent handling 
-of open Word documents with multiple paste modes.
+This utility searches for blocks in an index and sends them to a speech document.
 """
 
 # Standard library imports
@@ -31,7 +27,7 @@ import keyboard
 import pythoncom
 import win32com.client
 
-# PyQt imports - grouped by functionality
+# PyQt imports
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 from PyQt6.QtCore import (
@@ -410,7 +406,7 @@ class HelpDialog(QDialog):
         tab_widget.addTab(self._create_general_tab(), "General")
         tab_widget.addTab(self._create_search_tab(), "Searching your Blocks")
         tab_widget.addTab(self._create_document_tab(), "Sending to Doc")
-        tab_widget.addTab(self._create_splitter_tab(), "Document Splitter") 
+        tab_widget.addTab(self._create_splitter_tab(), "Add Files to Index") 
         tab_widget.addTab(self._create_shortcuts_tab(), "Keyboard Shortcuts")
         
         # Add close button
@@ -533,19 +529,28 @@ class HelpDialog(QDialog):
         layout = QVBoxLayout(widget)
         
         text = """
-        <h2>Document Splitter</h2>
+        <h2>Add Files to Index</h2>
         
         <h3>Overview:</h3>
-        <p>The Document Splitter allows you to break a large Word document into smaller files based on heading levels.
-        This is useful for extracting blocks from a large file.</p>
+        <p>The document splitter allows you to break large Word documents into smaller files based on heading levels.
+        This allows you to extract blocks from large files and add them to your searchable index.</p>
         
         <h3>How to Access:</h3>
-        <p>Open the splitter from <b>Document Tools → Split Document by Headings</b></p>
+        <p>Navigate to <b>Index → Add Files to Index</b></p>
         
-        <h3>Using the Splitter:</h3>
+        <h3>Using the Queue System:</h3>
+        <p>The utility supports adding multiple documents in sequence:</p>
+        <ol>
+            <li><b>Add Documents to Queue:</b> Configure settings for each document and add to the processing queue</li>
+            <li><b>Manage Queue:</b> View, remove, or modify settings for queued documents</li>
+            <li><b>Process Queue:</b> Start processing all documents in the queue</li>
+            <li><b>Monitor Progress:</b> Track progress for each document in real-time</li>
+        </ol>
+        
+        <h3>Document Configuration:</h3>
         <ol>
             <li><b>Select Input Document:</b> Choose the Word document you want to split</li>
-            <li><b>Choose Template Document (Recommended):</b> Select a document to use as a template for output files. This should be a blank word document created using your version of Verbatim.</li> 
+            <li><b>Choose Template Document (Recommended):</b> Select a document to use as a template for output files. This should be a blank Word document created using your version of Verbatim.</li> 
                 <ul>
                     <li>If no template is selected, a minimal default template will be created</li>
                 </ul>
@@ -560,17 +565,27 @@ class HelpDialog(QDialog):
                 <ul>
                     <li><b>Create ZIP Archive:</b> Package all split documents into a single ZIP file</li>
                     <li><b>Individual Files:</b> Save each section as a separate document</li>
+                    <li><b>Preserve Hierarchy:</b> Maintain the original document's structure in folders</li>
                 </ul>
             </li>
             <li><b>Select Output Location:</b> Choose where to save the output files</li>
-            <li><b>Process Document:</b> Click the button to start the splitting process</li>
+            <li><b>Add to Queue:</b> Add the configured document to the processing queue</li>
         </ol>
+        
+        <h3>Queue Management:</h3>
+        <ul>
+            <li><b>View Status:</b> Monitor progress for each document in the queue</li>
+            <li><b>Change Destination:</b> Modify the output location for queued documents</li>
+            <li><b>Remove Items:</b> Remove documents from the queue before processing</li>
+            <li><b>Cancel Processing:</b> Stop the current operation if needed</li>
+        </ul>
         
         <h3>Tips:</h3>
         <ul>
             <li>Results will be best for files that use Verbatim styles</li>
             <li>Heading 1 will target Pockets, Heading 2 Hats, Heading 3 Blocks, and Heading 4 Tags</li>
-            <li>Use the ZIP option for easier file management when creating many documents</li>
+            <li>Use the ZIP option for easier management if you need to share the index</li>
+            <li>For large documents, processing may take some time - the queue system lets you set up multiple jobs</li>
         </ul>
         """
         
@@ -1189,7 +1204,7 @@ class DocxSplitter:
         if all_sections:
             all_sections[-1].end_index = len(self.doc.paragraphs) - 1
         
-        # Second pass: Fill in content
+        # Second pass: Fill in content - optimized approach
         total_sections = len(all_sections)
         total_paragraphs = len(self.doc.paragraphs)
         self.status_callback(f"Organizing content for {total_sections} sections ({total_paragraphs} paragraphs total)...")
@@ -1198,28 +1213,36 @@ class DocxSplitter:
         # Only show detailed progress for documents with many sections
         show_detailed_progress = total_sections > 50 or total_paragraphs > 5000
         
-        # Calculate total workload for progress reporting
-        total_paragraphs_to_process = sum(section.end_index - section.start_index + 1 for section in all_sections)
-        paragraphs_processed = 0
-        last_progress_report = 0
-        progress_interval = max(1, total_paragraphs_to_process // 20)  # Report at 5% intervals
+        # Cache doc.paragraphs as list - this prevents repeated COM object access which is slow
+        # This is a critical optimization for large documents with many paragraphs
+        paragraphs_list = list(self.doc.paragraphs)
+        paragraphs_len = len(paragraphs_list)
         
-        # Process sections
+        # Process sections in batches with fewer progress updates
+        section_batch_size = max(1, total_sections // 20)  # Report progress at 5% intervals
+        paragraphs_processed = 0
+        
+        # Process sections with minimal overhead
         for section_idx, section in enumerate(all_sections):
-            # Report section progress
-            if show_detailed_progress and section_idx % 10 == 0:
+            # Report section progress only at intervals - reduces overhead from UI updates
+            if show_detailed_progress and section_idx % section_batch_size == 0:
+                batch_progress = min(100, int((section_idx / total_sections) * 100))
                 self.status_callback(f"Processing section {section_idx+1}/{total_sections} content...")
+                self.progress_callback(batch_progress)
             
-            # Process content for this section
-            # Use inclusive range from start to end
-            for idx in range(section.start_index, section.end_index + 1):
+            # Check for cancellation periodically
+            if section_idx % 50 == 0 and self.cancel_requested:
+                self.status_callback("Cancellation requested during content processing")
+                break
                 
-                # Add content
-                if idx < len(self.doc.paragraphs):
-                    section.content.append(self.doc.paragraphs[idx])
-                    
-                # Update count for total processed paragraphs
-                paragraphs_processed += 1
+            # Fast batch assignment of content instead of appending one by one
+            # This eliminates the inner loop and improves performance dramatically
+            start_idx = section.start_index
+            end_idx = min(section.end_index + 1, paragraphs_len)
+            section.content = paragraphs_list[start_idx:end_idx]
+            
+            # Update count for total processed paragraphs
+            paragraphs_processed += end_idx - start_idx
         
         self.status_callback(f"Content organization complete - processed {paragraphs_processed} paragraphs")
         print(f"Content organization complete - processed {paragraphs_processed} paragraphs")
@@ -1586,134 +1609,193 @@ class DocxSplitter:
                     print(f"Could not copy paragraph format property {prop}: {e}")
     
     def _create_zip_archive(self, output_dir: Path, preserve_hierarchy: bool = False) -> Path:
-        """Create zip archive with section documents, optionally preserving hierarchy."""
+        """Create zip archive with section documents using parallel processing for faster execution."""
+        import concurrent.futures
+        import json
+        from threading import Lock
+        
         zip_path = output_dir / f"{self.input_path.stem}_sections.zip"
+        total_sections = len(self.sections)
         
         # Use temporary directory for intermediate files
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            progress_lock = Lock()
+            file_entries = []
             
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
-                total_sections = len(self.sections)
-                for idx, section in enumerate(self.sections, 1):
-                    # Check for cancellation
-                    if self.cancel_requested:
-                        self.status_callback("Operation canceled by user")
-                        return None
-
-                    try:
-                        # Create document for section
-                        doc = self._create_section_document(section)
+            # Function to process a single section in a worker thread
+            def process_section(task):
+                idx, section = task
+                
+                if self.cancel_requested:
+                    return None
+                    
+                # Result dict to track progress and collect file paths
+                result = {
+                    "success": False,
+                    "section_title": section.safe_title,
+                    "error": None,
+                    "temp_file": None,
+                    "archive_path": None,
+                    "meta_file": None,
+                    "meta_archive_path": None
+                }
+                
+                try:
+                    # Create document for section
+                    doc = self._create_section_document(section)
+                    
+                    # Add hierarchy metadata and get metadata dict
+                    metadata = self._add_document_metadata(doc, section, self.sections)
+                    
+                    # Determine path within zip based on hierarchy option
+                    if preserve_hierarchy and section.parent:
+                        # Get folder structure from parent hierarchy
+                        folder_components = section.get_path_components()
                         
-                        # Add hierarchy metadata and get metadata dict
-                        metadata = self._add_document_metadata(doc, section, self.sections)
-                        
-                        # Create a separate metadata file
-                        if metadata:
-                            import json
-                            # Save metadata to a JSON file with the same name + .meta.json
-                            meta_file = temp_path / f"{section.safe_title}.meta.json"
-                            with open(meta_file, 'w', encoding='utf-8') as f:
-                                json.dump(metadata, f, indent=2)
-                        
-                        # Determine path within zip based on hierarchy option
-                        if preserve_hierarchy and section.parent:
-                            # Get folder structure from parent hierarchy
-                            folder_components = section.get_path_components()
-                            
-                            # Create base temp file path 
-                            section_dir = temp_path
+                        # Create base temp file path 
+                        section_dir = temp_path
+                        with progress_lock:  # Thread-safe directory creation
                             for component in folder_components:
                                 section_dir = section_dir / component
                                 section_dir.mkdir(exist_ok=True, parents=True)
-                            
-                            temp_file = section_dir / f"{section.safe_title}.docx"
-                            
-                            # Create archive path with folders
-                            archive_path = '/'.join(folder_components + [f"{section.safe_title}.docx"])
-                        else:
-                            # No hierarchy - flat structure
-                            temp_file = temp_path / f"{section.safe_title}.docx"
-                            archive_path = temp_file.name
                         
-                        # Save to temp file
-                        doc.save(temp_file)
+                        temp_file = section_dir / f"{section.safe_title}.docx"
                         
-                        # Add to archive with proper path
-                        archive.write(temp_file, archive_path)
-                        
-                        # Add metadata file to archive if it exists
-                        meta_file = temp_path / f"{section.safe_title}.meta.json"
-                        if meta_file.exists():
-                            meta_archive_path = archive_path + ".meta.json"
-                            archive.write(meta_file, meta_archive_path)
-                        
-                        # Report progress
-                        percent_complete = int((idx / total_sections) * 100)
-                        self.progress_callback(percent_complete)
-                        self.status_callback(f"Processed section {idx}/{total_sections}: {section.safe_title}")
-                        
-                    except Exception as e:
-                        self.status_callback(f"Error processing section '{section.safe_title}': {str(e)}")
-                        continue
-                
-                if self.cancel_requested:
-                    self.status_callback("Operation canceled while creating archive")
-                    return None
+                        # Create archive path with folders
+                        archive_path = '/'.join(folder_components + [f"{section.safe_title}.docx"])
+                    else:
+                        # No hierarchy - flat structure
+                        temp_file = temp_path / f"{section.safe_title}.docx"
+                        archive_path = temp_file.name
                     
+                    # Save to temp file
+                    doc.save(temp_file)
+                    result["temp_file"] = temp_file
+                    result["archive_path"] = archive_path
+                    
+                    # Create a separate metadata file
+                    if metadata:
+                        meta_file = temp_path / f"{section.safe_title}.meta.json"
+                        with open(meta_file, 'w', encoding='utf-8') as f:
+                            json.dump(metadata, f, indent=2)
+                        
+                        result["meta_file"] = meta_file
+                        result["meta_archive_path"] = archive_path + ".meta.json"
+                    
+                    result["success"] = True
+                    
+                except Exception as e:
+                    result["error"] = str(e)
+                
+                return result
+            
+            # Prepare tasks for parallel processing
+            tasks = [(i, section) for i, section in enumerate(self.sections, 1)]
+            
+            # Calculate optimal number of workers
+            max_workers = min(os.cpu_count() or 4, max(1, 32 if total_sections < 100 else 16))
+            self.status_callback(f"Creating documents using {max_workers} parallel workers...")
+            
+            # Process sections in parallel first to create all necessary files
+            completed = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_idx = {executor.submit(process_section, task): task[0] for task in tasks}
+                
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    
+                    try:
+                        result = future.result()
+                        if result is None:  # Cancellation
+                            continue
+                            
+                        completed += 1
+                        
+                        # Update progress
+                        with progress_lock:
+                            percent_complete = int(completed / total_sections * 100)
+                            self.progress_callback(percent_complete)
+                            
+                            # Get shortened section title for status
+                            section_title = result["section_title"]
+                            if len(section_title) > 30:
+                                section_title = section_title[:27] + "..."
+                            
+                            # Update UI
+                            if result["success"]:
+                                self.status_callback(f"Created document {completed}/{total_sections}: '{section_title}'")
+                                # Add to entries list for zip creation
+                                if result["temp_file"] and result["archive_path"]:
+                                    file_entries.append((result["temp_file"], result["archive_path"]))
+                                    if result["meta_file"] and result["meta_archive_path"]:
+                                        file_entries.append((result["meta_file"], result["meta_archive_path"]))
+                            else:
+                                self.status_callback(f"Error processing {idx}/{total_sections}: '{section_title}' - {result['error']}")
+                        
+                        # Check for cancellation
+                        if self.cancel_requested:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            self.status_callback("Operation canceled - stopping all processing")
+                            return None
+                            
+                    except Exception as e:
+                        with progress_lock:
+                            self.status_callback(f"Error in worker {idx}: {str(e)}")
+            
+            # Check if processing was canceled
+            if self.cancel_requested:
+                self.status_callback("Operation canceled while processing documents")
+                return None
+                
+            # Create the zip file now that all documents have been generated
+            self.status_callback(f"Creating ZIP archive with {len(file_entries)} files...")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+                for temp_file, archive_path in file_entries:
+                    try:
+                        archive.write(temp_file, archive_path)
+                    except Exception as e:
+                        self.status_callback(f"Error adding {temp_file.name} to archive: {str(e)}")
+                        
             self.status_callback(f"Created archive at: {zip_path}")
             return zip_path
     
     def _save_individual_files(self, output_dir: Path, preserve_hierarchy: bool = False) -> Path:
-        """Save individual document files with optional hierarchy preservation and progress updates."""
+        """Save individual document files with parallel processing for improved performance."""
+        import concurrent.futures
+        import json
+        from threading import Lock
+        
         total_sections = len(self.sections)
         files_created = 0
+        progress_lock = Lock()
         
         # Initial status update for document creation phase
-        self.status_callback(f"Creating {total_sections} individual documents...")
+        self.status_callback(f"Creating {total_sections} individual documents using parallel processing...")
         
-        for idx, section in enumerate(self.sections, 1):
-            # Check for cancellation
+        # Function to process a single section in a worker thread
+        def process_section(task):
+            idx, section = task
+            
             if self.cancel_requested:
-                self.status_callback("Operation canceled by user")
                 return None
                 
-            # Provide detailed status update for each section
-            section_title = section.title[:30] + "..." if len(section.title) > 30 else section.title
-            self.status_callback(f"Processing document {idx}/{total_sections}: '{section_title}'")
-            
-            # Update progress reporting
-            percent_complete = int((idx - 1) / total_sections * 100)
-            self.progress_callback(percent_complete)
+            # Progress tracking variables that will be returned from worker
+            result = {
+                "success": False,
+                "section_title": section.safe_title,
+                "error": None,
+                "output_file": None
+            }
             
             try:
                 # Create document for section - most time-consuming part
-                self.status_callback(f"Creating document {idx}/{total_sections}")
                 doc = self._create_section_document(section)
                 
-                # Add hierarchy metadata and get metadata dict
-                self.status_callback(f"Adding metadata to document {idx}/{total_sections}")
+                # Add hierarchy metadata
                 metadata = self._add_document_metadata(doc, section, self.sections)
-                
-                # Create a separate metadata file
-                if metadata:
-                    import json
-                    # Save metadata to a JSON file with the same name + .meta.json
-                    meta_file_path = output_dir / f"{section.safe_title}.meta.json"
-                    if preserve_hierarchy and section.parent is not None:
-                        # Adjust path for hierarchical structure
-                        folder_components = section.get_path_components()
-                        section_dir = output_dir
-                        for component in folder_components:
-                            section_dir = section_dir / component
-                        meta_file_path = section_dir / f"{section.safe_title}.meta.json"
-                        
-                    # Make sure parent directory exists
-                    meta_file_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    # Save metadata to file
-                    with open(meta_file_path, 'w', encoding='utf-8') as f:
-                        json.dump(metadata, f, indent=2)
                 
                 # Determine output path based on hierarchy option
                 if preserve_hierarchy and section.parent is not None:
@@ -1721,32 +1803,95 @@ class DocxSplitter:
                     folder_components = section.get_path_components()
                     section_dir = output_dir
                     
-                    # Create nested folders
+                    # Create directories if they don't exist
                     for component in folder_components:
                         section_dir = section_dir / component
-                        section_dir.mkdir(exist_ok=True, parents=True)
+                        with progress_lock:  # Prevent race conditions in directory creation
+                            section_dir.mkdir(exist_ok=True, parents=True)
                     
                     output_file = section_dir / f"{section.safe_title}.docx"
-                    relative_path = "/".join(folder_components + [section.safe_title])
-                    print(f"Writing to hierarchical path: {relative_path}")
+                    
+                    # Create metadata file path
+                    if metadata:
+                        meta_file_path = section_dir / f"{section.safe_title}.meta.json"
                 else:
                     # Flat structure - just save directly to output directory
                     output_file = output_dir / f"{section.safe_title}.docx"
-                    print(f"Writing to flat path: {section.safe_title}")
+                    
+                    # Create metadata file path
+                    if metadata:
+                        meta_file_path = output_dir / f"{section.safe_title}.meta.json"
+                
+                # Write metadata file if we have metadata
+                if metadata:
+                    with progress_lock:  # Prevent race conditions in file writing
+                        with open(meta_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(metadata, f, indent=2)
                 
                 # Save the document
                 doc.save(output_file)
-                files_created += 1
                 
-                # Report progress
-                percent_complete = int((idx / total_sections) * 100)
-                self.progress_callback(percent_complete)
-                self.status_callback(f"Processed section {idx}/{total_sections}: {section.safe_title}")
+                # Update result status
+                result["success"] = True
+                result["output_file"] = str(output_file)
                 
             except Exception as e:
-                self.status_callback(f"Error processing section '{section.safe_title}': {str(e)}")
-                continue
+                result["error"] = str(e)
+                
+            return result
+        
+        # Prepare tasks for parallel processing
+        tasks = [(i, section) for i, section in enumerate(self.sections, 1)]
+        
+        # Calculate optimal number of workers based on CPU count and document size
+        # For very large documents with many sections, limit worker count to prevent memory issues
+        max_workers = min(os.cpu_count() or 4, max(1, 32 if total_sections < 100 else 16))
+        self.status_callback(f"Using {max_workers} parallel workers for document creation")
+        
+        # Process sections in parallel
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_idx = {executor.submit(process_section, task): task[0] for task in tasks}
             
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                
+                try:
+                    result = future.result()
+                    if result is None:  # Cancellation
+                        continue
+                        
+                    completed += 1
+                    
+                    # Update progress
+                    with progress_lock:
+                        percent_complete = int(completed / total_sections * 100)
+                        self.progress_callback(percent_complete)
+                        
+                        # Get shortened section title for status
+                        section_title = result["section_title"]
+                        if len(section_title) > 30:
+                            section_title = section_title[:27] + "..."
+                        
+                        # Update UI
+                        if result["success"]:
+                            files_created += 1
+                            self.status_callback(f"Processed {completed}/{total_sections}: '{section_title}'")
+                        else:
+                            self.status_callback(f"Error processing {idx}/{total_sections}: '{section_title}' - {result['error']}")
+                    
+                    # Check for cancellation
+                    if self.cancel_requested:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        self.status_callback("Operation canceled - stopping all processing")
+                        return None
+                        
+                except Exception as e:
+                    with progress_lock:
+                        self.status_callback(f"Error in worker {idx}: {str(e)}")
+        
         if self.cancel_requested:
             self.status_callback("Operation canceled while saving files")
             return None
@@ -1871,7 +2016,7 @@ class AddToIndexDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Split Document by Headings")
+        self.setWindowTitle("Add Files to Index")
         self.setMinimumSize(800, 600)  # Larger size to accommodate queue
         
         # Initialize state variables
@@ -5071,15 +5216,13 @@ class DocxSearchApp(QMainWindow):
         quit_action.setShortcuts([QKeySequence("Alt+F4"), QKeySequence("Ctrl+Q")])
         quit_action.triggered.connect(self.quit_application)
 
-        # Index menu (renamed from Document Tools)
+        # Index menu
         index_menu = menubar.addMenu('Index')
         
-        # Add Files to Index (renamed from Split Document by Headings)
+        # Add Files to Index
         add_to_index_action = index_menu.addAction('Add Files to Index...')
         add_to_index_action.triggered.connect(self.show_document_splitter)
         
-        # Update Index feature removed
-
         # Target document menu
         target_menu = menubar.addMenu('Send to Closed Doc')
         select_target_action = target_menu.addAction('Select Destination...')
