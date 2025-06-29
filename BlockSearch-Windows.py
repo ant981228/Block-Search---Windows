@@ -3330,6 +3330,7 @@ class UpdateIndexDialog(QDialog):
         self.is_processing = False
         self.update_mode = "add_new"  # "update_all" or "add_new"
         self.check_removed = False
+        self.replacement_template_path = None  # For Update All tab
         
         # Threading components
         self.worker = None
@@ -3514,6 +3515,35 @@ class UpdateIndexDialog(QDialog):
         
         update_all_layout.addWidget(index_folder_group)
         
+        # Template replacement section (initially hidden)
+        self.template_replacement_group = QGroupBox("Template Replacement")
+        template_replacement_layout = QVBoxLayout(self.template_replacement_group)
+        
+        self.template_warning_label = QLabel()
+        self.template_warning_label.setWordWrap(True)
+        self.template_warning_label.setStyleSheet("QLabel { color: #ff6b6b; padding: 5px; }")
+        template_replacement_layout.addWidget(self.template_warning_label)
+        
+        # Template selection
+        template_select_layout = QHBoxLayout()
+        template_select_label = QLabel("Replacement Template:")
+        self.replacement_template_field = QLineEdit()
+        self.replacement_template_field.setReadOnly(True)
+        self.replacement_template_field.setPlaceholderText("Select a template document to use for all updates")
+        
+        template_browse_button = QPushButton("Browse...")
+        template_browse_button.clicked.connect(self.browse_replacement_template)
+        
+        template_select_layout.addWidget(template_select_label)
+        template_select_layout.addWidget(self.replacement_template_field, 1)
+        template_select_layout.addWidget(template_browse_button)
+        
+        template_replacement_layout.addLayout(template_select_layout)
+        
+        # Initially hide the template replacement section
+        self.template_replacement_group.setVisible(False)
+        update_all_layout.addWidget(self.template_replacement_group)
+        
         # Source documents display
         sources_group = QGroupBox("Discovered Source Documents")
         sources_layout = QVBoxLayout(sources_group)
@@ -3636,6 +3666,7 @@ class UpdateIndexDialog(QDialog):
             return
         
         discovered_sources = []
+        self.missing_templates = set()  # Track unique missing template paths
         
         # Look for all metadata files recursively
         metadata_files = list(index_folder.rglob("*_metadata.json"))
@@ -3652,16 +3683,25 @@ class UpdateIndexDialog(QDialog):
                     subfolder = metadata_file.parent
                     
                     if source_path.exists():
+                        # Check if template exists
+                        template_path = metadata.get('template_path')
+                        template_exists = template_path and Path(template_path).exists()
+                        
+                        if not template_exists and template_path:
+                            self.missing_templates.add(template_path)
+                        
                         discovered_sources.append({
                             'source_path': source_path,
                             'metadata_file': metadata_file,
                             'subfolder': subfolder,
-                            'metadata': metadata
+                            'metadata': metadata,
+                            'template_exists': template_exists
                         })
                         
                         # Add to list widget with relative path for better visibility
                         relative_path = subfolder.relative_to(index_folder)
-                        item_text = f"{source_path.name} → {relative_path}"
+                        template_warning = " ⚠️ (missing template)" if not template_exists else ""
+                        item_text = f"{source_path.name} → {relative_path}{template_warning}"
                         self.sources_list.addItem(item_text)
                     else:
                         # Source file doesn't exist - add error item
@@ -3681,9 +3721,28 @@ class UpdateIndexDialog(QDialog):
         if self.has_nested_indexes:
             print("WARNING: Nested indexes detected!")
         
-        # Enable add all button if we found valid sources
+        # Show/hide template replacement section based on missing templates
+        if self.missing_templates:
+            # Show template replacement section
+            self.template_replacement_group.setVisible(True)
+            template_list = "\n".join(f"• {path}" for path in sorted(self.missing_templates))
+            self.template_warning_label.setText(
+                f"⚠️ The following template files were not found:\n{template_list}\n\n"
+                "Please select a replacement template to use for all updates."
+            )
+            # Disable add all button until replacement template is selected
+            self.add_all_button.setEnabled(False)
+        else:
+            # Hide template replacement section
+            self.template_replacement_group.setVisible(False)
+            self.replacement_template_path = None
+            self.replacement_template_field.clear()
+            # Enable add all button if we found valid sources
+            if discovered_sources:
+                self.add_all_button.setEnabled(True)
+        
+        # Update status message
         if discovered_sources:
-            self.add_all_button.setEnabled(True)
             print(f"DISCOVERED: {len(discovered_sources)} source documents in index folder")
         else:
             self.sources_list.addItem("No valid source documents found in this index folder")
@@ -3713,6 +3772,24 @@ class UpdateIndexDialog(QDialog):
                         pass
         
         return False
+    
+    def browse_replacement_template(self):
+        """Open file dialog to select replacement template document."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Replacement Template Document",
+            self.settings.value('last_template_dir', ''),
+            "Word Documents (*.docx)"
+        )
+        
+        if file_path:
+            self.replacement_template_path = Path(file_path)
+            self.replacement_template_field.setText(str(self.replacement_template_path))
+            self.settings.setValue('last_template_dir', str(self.replacement_template_path.parent))
+            
+            # Enable add all button if we have discovered sources
+            if hasattr(self, 'discovered_sources') and self.discovered_sources:
+                self.add_all_button.setEnabled(True)
     
     def add_all_to_queue(self):
         """Add all discovered source documents to the queue."""
@@ -3748,15 +3825,34 @@ class UpdateIndexDialog(QDialog):
             try:
                 metadata = source_info['metadata']
                 
+                # Determine which template to use
+                original_template_path = Path(metadata.get('template_path', ''))
+                
+                if self.replacement_template_path:
+                    # Use replacement template for all
+                    template_to_use = self.replacement_template_path
+                else:
+                    # Use original template from metadata
+                    template_to_use = original_template_path
+                    
+                    # Skip if template doesn't exist and no replacement provided
+                    if not template_to_use.exists():
+                        print(f"Skipping {source_info['source_path'].name}: Template not found and no replacement provided")
+                        continue
+                
                 # Create queue item from metadata
                 queue_item = SplitQueueItem(
                     input_path=source_info['source_path'],
-                    template_path=Path(metadata.get('template_path', '')),
+                    template_path=template_to_use,
                     output_dir=source_info['subfolder'],
                     heading_level=metadata.get('heading_level', 3),
                     preserve_hierarchy=metadata.get('preserve_hierarchy', False),
                     create_zip=False
                 )
+                
+                # Store original template path if we're using a replacement
+                if self.replacement_template_path and template_to_use != original_template_path:
+                    queue_item.original_template_path = original_template_path
                 
                 # Add update-specific attributes
                 queue_item.update_mode = update_mode
@@ -4321,6 +4417,12 @@ class UpdateIndexWorker(DocxSplitterWorker):
     def _process_add_new_only(self, queue_item, index, check_removed):
         """Process add new only mode - skip existing files."""
         try:
+            # Check if we need to update metadata with new template path
+            needs_metadata_update = False
+            if hasattr(queue_item, 'original_template_path'):
+                # This is set when we use a replacement template
+                needs_metadata_update = queue_item.template_path != queue_item.original_template_path
+            
             # Create splitter with skip-existing functionality
             splitter = DocxSplitter(
                 input_path=queue_item.input_path,
@@ -4361,12 +4463,48 @@ class UpdateIndexWorker(DocxSplitterWorker):
                 if check_removed and existing_files:
                     self._check_removed_headings(queue_item, index, splitter, existing_files)
                 
+                # Always update metadata timestamp, and template path if needed
+                self._update_metadata_after_update(queue_item, needs_metadata_update)
+                
                 self.item_completed.emit(index, result, "completed")
             else:
                 raise ValueError("Document processing failed")
             
         except Exception as e:
             raise Exception(f"Add new only failed: {str(e)}")
+    
+    def _update_metadata_after_update(self, queue_item, update_template_path=False):
+        """Update metadata file after an update operation."""
+        try:
+            # Find metadata file in output directory
+            metadata_files = list(queue_item.output_dir.glob("*_metadata.json"))
+            if not metadata_files:
+                print(f"WARNING: No metadata file found to update in {queue_item.output_dir}")
+                return
+            
+            for metadata_file in metadata_files:
+                # Read existing metadata
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                
+                # Always update timestamp
+                metadata['created_timestamp'] = datetime.now().isoformat()
+                
+                # Update template path if needed
+                if update_template_path:
+                    old_template = metadata.get('template_path', 'None')
+                    metadata['template_path'] = str(queue_item.template_path.absolute())
+                    print(f"UPDATED METADATA: {metadata_file.name} - template path changed from {old_template} to {queue_item.template_path}")
+                else:
+                    print(f"UPDATED METADATA: {metadata_file.name} - timestamp updated")
+                
+                # Write updated metadata
+                with open(metadata_file, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2)
+                
+        except Exception as e:
+            print(f"Error updating metadata file: {e}")
+            # Don't fail the whole operation if metadata update fails
     
     def _reorganize_files_for_hierarchy(self, queue_item, index, splitter):
         """
