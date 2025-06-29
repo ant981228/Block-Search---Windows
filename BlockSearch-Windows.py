@@ -243,7 +243,7 @@ class DocxSplitterWorker(QObject):
     
     # Define signals for communication with main thread
     status_changed = pyqtSignal(int, str)  # index, status message
-    progress_updated = pyqtSignal(int, int)  # index, progress percentage
+    progress_updated = pyqtSignal(int, int, str)  # index, progress percentage, phase
     item_completed = pyqtSignal(int, Path, str)  # index, result_path, status
     item_error = pyqtSignal(int, str)  # index, error message
     all_completed = pyqtSignal()  # Signal when all items are processed
@@ -277,9 +277,9 @@ class DocxSplitterWorker(QObject):
         # Emit the status change with the message
         self.status_changed.emit(self.current_index, message)
     
-    def _progress_callback(self, percent):
+    def _progress_callback(self, percent, phase="processing"):
         """Progress callback for DocxSplitter."""
-        self.progress_updated.emit(self.current_index, percent)
+        self.progress_updated.emit(self.current_index, percent, phase)
     
     def process_queue(self):
         """Process all queue items starting from current_index.
@@ -1190,7 +1190,7 @@ class DocxSplitter:
         self.input_path = input_path
         self.template_path = template_path
         self.status_callback = status_callback or (lambda msg: None)
-        self.progress_callback = progress_callback or (lambda percent: None)
+        self.progress_callback = progress_callback or (lambda percent, phase="processing": None)
         
         # Verify template exists
         if not template_path.exists():
@@ -1318,7 +1318,7 @@ class DocxSplitter:
             if show_detailed_progress and section_idx % section_batch_size == 0:
                 batch_progress = min(100, int((section_idx / total_sections) * 100))
                 self.status_callback(f"Processing section {section_idx+1}/{total_sections} content...")
-                self.progress_callback(batch_progress)
+                self.progress_callback(batch_progress, "parsing")
             
             # Check for cancellation periodically
             if section_idx % 50 == 0 and self.cancel_requested:
@@ -1571,7 +1571,7 @@ class DocxSplitter:
             
             # Update progress
             percent = int((completed / total_sections) * 100)
-            self.progress_callback(percent)
+            self.progress_callback(percent, "processing")
             
             # Call detailed progress callback if provided
             if progress_callback:
@@ -1976,7 +1976,7 @@ class DocxSplitter:
                         # Update progress
                         with progress_lock:
                             percent_complete = int(completed / total_sections * 100)
-                            self.progress_callback(percent_complete)
+                            self.progress_callback(percent_complete, "processing")
                             
                             # Get shortened section title for status
                             section_title = result["section_title"]
@@ -2135,7 +2135,7 @@ class DocxSplitter:
                     # Update progress
                     with progress_lock:
                         percent_complete = int(completed / total_sections * 100)
-                        self.progress_callback(percent_complete)
+                        self.progress_callback(percent_complete, "processing")
                         
                         # Get shortened section title for status
                         section_title = result["section_title"]
@@ -2734,6 +2734,9 @@ class AddToIndexDialog(QDialog):
         # Enable queue buttons
         self.clear_queue_button.setEnabled(True)
         
+        # Recalculate overall progress since queue size changed
+        self._update_overall_progress()
+        
         # If not currently processing, enable the start button
         # otherwise the new item will be picked up by the running process
         if not self.is_processing:
@@ -2786,6 +2789,9 @@ class AddToIndexDialog(QDialog):
                 self.clear_queue_button.setEnabled(False)
             
             self.update_status(f"Removed item from queue")
+            
+            # Recalculate overall progress since queue size changed
+            self._update_overall_progress()
     
     def clear_queue(self):
         """Clear all items from the queue."""
@@ -2826,6 +2832,9 @@ class AddToIndexDialog(QDialog):
         self.progress_bar.setVisible(False)
         
         self.update_status("Queue cleared")
+        
+        # Recalculate overall progress since queue was cleared
+        self._update_overall_progress()
     
     def clear_completed_items(self):
         """Remove completed items from the queue."""
@@ -2923,9 +2932,9 @@ class AddToIndexDialog(QDialog):
             # Nothing to do here - we don't display individual status messages in widgets
             pass
             
-    def on_worker_progress_updated(self, index, percent):
+    def on_worker_progress_updated(self, index, percent, phase="processing"):
         """Handle progress update from worker."""
-        # Update the queue item
+        # Update the queue item with raw progress for individual progress bars
         if 0 <= index < len(self.queue_items):
             self.queue_items[index].progress = percent
             
@@ -2934,17 +2943,41 @@ class AddToIndexDialog(QDialog):
                 self.queue_widgets[index].update_status()
                 
         # Update overall progress
+        self._update_overall_progress(index, percent, phase)
+        
+    def _update_overall_progress(self, current_index=None, current_percent=0, phase="processing"):
+        """Calculate and update overall progress bar based on equal weighting per item."""
         total_items = len(self.queue_items)
-        completed_items = sum(1 for item in self.queue_items if item.status in ["completed", "error"])
-        in_progress_contribution = 0
-        
-        # Add contribution of current in-progress item
-        if 0 <= index < len(self.queue_items) and self.queue_items[index].status == "processing":
-            in_progress_contribution = percent / total_items
+        if total_items == 0:
+            self.progress_bar.setValue(0)
+            return
             
-        overall_progress = int((completed_items / total_items * 100) + in_progress_contribution)
-        self.progress_bar.setValue(overall_progress)
+        # Each item gets equal weight in the overall progress
+        item_weight = 100.0 / total_items
         
+        # Count completed items
+        completed_items = sum(1 for item in self.queue_items if item.status in ["completed", "error"])
+        completed_contribution = completed_items * item_weight
+        
+        # Add contribution from current in-progress item
+        current_contribution = 0
+        if (current_index is not None and 
+            0 <= current_index < len(self.queue_items) and 
+            self.queue_items[current_index].status == "processing"):
+            
+            # Apply phase weighting to the current item's progress
+            if phase == "parsing":
+                # Parsing contributes 10% of the item's total weight
+                weighted_percent = current_percent * 0.1
+            else:  # phase == "processing"
+                # Processing contributes 10% (from parsing) + 90% (current progress)
+                weighted_percent = 10 + current_percent * 0.9
+            
+            current_contribution = (weighted_percent / 100.0) * item_weight
+        
+        overall_progress = int(completed_contribution + current_contribution)
+        self.progress_bar.setValue(min(100, overall_progress))
+    
     def on_worker_item_completed(self, index, result_path, status):
         """Handle item completion from worker."""
         if 0 <= index < len(self.queue_items):
@@ -2959,6 +2992,9 @@ class AddToIndexDialog(QDialog):
             self.update_status(f"Completed processing {self.queue_items[index].display_name}")
             self.clear_completed_button.setEnabled(True)
             
+            # Recalculate overall progress since an item completed
+            self._update_overall_progress()
+            
     def on_worker_item_error(self, index, error_message):
         """Handle item error from worker."""
         if 0 <= index < len(self.queue_items):
@@ -2971,6 +3007,9 @@ class AddToIndexDialog(QDialog):
                 
             self.update_status(f"Error processing {self.queue_items[index].display_name}: {error_message}")
             self.clear_completed_button.setEnabled(True)
+            
+            # Recalculate overall progress since an item errored (counts as completed)
+            self._update_overall_progress()
             
     def on_worker_all_completed(self):
         """Handle completion of all queue items."""
@@ -3034,7 +3073,7 @@ class AddToIndexDialog(QDialog):
                 queue_item.input_path,
                 queue_item.template_path,
                 status_callback=lambda msg: self._update_item_status(index, msg),
-                progress_callback=lambda percent: self._update_item_progress(index, percent)
+                progress_callback=lambda percent, phase="processing": self._update_item_progress(index, percent)
             )
             
             # Parse document sections
@@ -4301,11 +4340,47 @@ class UpdateIndexDialog(QDialog):
         if 0 <= index < len(self.queue_widgets):
             self.queue_widgets[index].update_status_message(message)
     
-    def on_worker_progress_updated(self, index, percent):
+    def on_worker_progress_updated(self, index, percent, phase="processing"):
         """Handle progress update from worker thread."""
+        # Update individual item progress (shows raw percent regardless of phase)
         if 0 <= index < len(self.queue_widgets):
             self.queue_widgets[index].update_progress(percent)
-        self.progress_bar.setValue(percent)
+        
+        # Update overall progress using the same logic as AddToIndexDialog
+        self._update_overall_progress(index, percent, phase)
+    
+    def _update_overall_progress(self, current_index=None, current_percent=0, phase="processing"):
+        """Calculate and update overall progress bar based on equal weighting per item."""
+        total_items = len(self.queue_items)
+        if total_items == 0:
+            self.progress_bar.setValue(0)
+            return
+            
+        # Each item gets equal weight in the overall progress
+        item_weight = 100.0 / total_items
+        
+        # Count completed items
+        completed_items = sum(1 for item in self.queue_items if item.status in ["completed", "error"])
+        completed_contribution = completed_items * item_weight
+        
+        # Add contribution from current in-progress item
+        current_contribution = 0
+        if (current_index is not None and 
+            0 <= current_index < len(self.queue_items) and 
+            self.queue_items[current_index].status == "processing"):
+            
+            # Apply phase weighting to the current item's progress
+            if phase == "parsing":
+                # Parsing contributes 10% of the item's total weight
+                weighted_percent = current_percent * 0.1
+            else:  # phase == "processing"
+                # Processing contributes 10% (from parsing) + 90% (current progress)
+                weighted_percent = 10 + current_percent * 0.9
+            
+            current_contribution = (weighted_percent / 100.0) * item_weight
+        
+        overall_progress = int(completed_contribution + current_contribution)
+        self.progress_bar.setValue(min(100, overall_progress))
     
     def on_worker_item_completed(self, index, result_path, status):
         """Handle item completion from worker thread."""
@@ -4317,6 +4392,7 @@ class UpdateIndexDialog(QDialog):
                 self.queue_widgets[index].set_completed(str(result_path))
             
             self.update_status(f"Completed processing {self.queue_items[index].display_name}")
+            self._update_overall_progress()
     
     def on_worker_item_error(self, index, error_message):
         """Handle item error from worker thread."""
@@ -4327,6 +4403,7 @@ class UpdateIndexDialog(QDialog):
                 self.queue_widgets[index].set_error(error_message)
             
             self.update_status(f"Error processing {self.queue_items[index].display_name}: {error_message}")
+            self._update_overall_progress()
     
     def on_processing_complete(self):
         """Handle completion of all queue processing."""
@@ -4498,8 +4575,8 @@ class UpdateIndexWorker(DocxSplitterWorker):
                 input_path=queue_item.input_path,
                 template_path=queue_item.template_path,
                 status_callback=lambda msg: self.status_changed.emit(index, msg),
-                progress_callback=lambda percent: self.progress_updated.emit(
-                    index, 20 + int(percent * 80 / 100)  # Use remaining 80% for rebuild
+                progress_callback=lambda percent, phase="processing": self.progress_updated.emit(
+                    index, 20 + int(percent * 80 / 100), phase  # Use remaining 80% for rebuild
                 )
             )
             
@@ -4544,7 +4621,7 @@ class UpdateIndexWorker(DocxSplitterWorker):
                 input_path=queue_item.input_path,
                 template_path=queue_item.template_path,
                 status_callback=lambda msg: self._status_callback_with_index(index, msg),
-                progress_callback=lambda percent: self._progress_callback_with_offset(index, percent, 0)
+                progress_callback=lambda percent, phase="processing": self._progress_callback_with_offset(index, percent, 0, phase)
             )
             
             # Parse sections
@@ -4792,15 +4869,15 @@ class UpdateIndexWorker(DocxSplitterWorker):
         """Status callback that includes the index."""
         self.status_changed.emit(index, message)
     
-    def _progress_callback_with_offset(self, index, percent, offset):
+    def _progress_callback_with_offset(self, index, percent, offset, phase="processing"):
         """Progress callback with offset for multi-step operations."""
         adjusted_percent = offset + int(percent * (100 - offset) / 100)
-        self.progress_updated.emit(index, adjusted_percent)
+        self.progress_updated.emit(index, adjusted_percent, phase)
     
     def _update_progress_callback(self, index, current, total, action):
         """Enhanced progress callback that shows what action is being taken."""
         percent = int(current / total * 100) if total > 0 else 0
-        self.progress_updated.emit(index, percent)
+        self.progress_updated.emit(index, percent, "processing")
         
         # Update status to show current action
         section_name = self.queue_items[index].input_path.stem
@@ -4815,8 +4892,8 @@ class UpdateIndexWorker(DocxSplitterWorker):
                 input_path=queue_item.input_path,
                 template_path=queue_item.template_path,
                 status_callback=lambda msg: self.status_changed.emit(index, msg),
-                progress_callback=lambda percent: self.progress_updated.emit(
-                    index, progress_offset + int(percent * (100 - progress_offset) / 100)
+                progress_callback=lambda percent, phase="processing": self.progress_updated.emit(
+                    index, progress_offset + int(percent * (100 - progress_offset) / 100), phase
                 )
             )
             
