@@ -6653,6 +6653,9 @@ class DocxSearchApp(QMainWindow):
         show_folder_action = settings_menu.addAction('Show Current Folder')
         show_folder_action.triggered.connect(self.show_current_folder)
         
+        reindex_action = settings_menu.addAction('Reindex')
+        reindex_action.triggered.connect(self.reindex_documents)
+        
         # Add Configure Shortcut option to Settings menu
         settings_menu.addSeparator()
         
@@ -7295,6 +7298,13 @@ class DocxSearchApp(QMainWindow):
             f"Currently searching in:\n{self.search_folder}\n\n"
             f"Number of indexed documents: {len(self.searcher.document_index)}"
         )
+    
+    def reindex_documents(self):
+        """Reindex the currently selected search folder."""
+        self.index_documents()
+        
+        # Show brief confirmation in status bar
+        self.statusBar().showMessage(f"Reindexing completed. Found {len(self.searcher.document_index)} documents.", 3000)
     
     def on_search_text_changed(self, text: str):
         """Handle search input changes with intelligent debouncing."""
