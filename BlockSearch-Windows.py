@@ -3628,7 +3628,7 @@ class UpdateIndexDialog(QDialog):
             self._discover_source_documents(Path(dir_path))
     
     def _discover_source_documents(self, index_folder):
-        """Discover source documents in the index folder by scanning for metadata files."""
+        """Discover source documents in the index folder by scanning for metadata files recursively."""
         self.sources_list.clear()
         self.add_all_button.setEnabled(False)
         
@@ -3637,42 +3637,49 @@ class UpdateIndexDialog(QDialog):
         
         discovered_sources = []
         
-        # Look for subdirectories that contain metadata files
-        for subfolder in index_folder.iterdir():
-            if subfolder.is_dir():
-                # Look for metadata files in this subfolder
-                metadata_files = list(subfolder.glob("*_metadata.json"))
-                for metadata_file in metadata_files:
-                    try:
-                        with open(metadata_file, 'r', encoding='utf-8') as f:
-                            metadata = json.load(f)
+        # Look for all metadata files recursively
+        metadata_files = list(index_folder.rglob("*_metadata.json"))
+        
+        for metadata_file in metadata_files:
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                
+                source_path = metadata.get('source_document_path')
+                if source_path:
+                    source_path = Path(source_path)
+                    # Get the subfolder (parent directory of metadata file)
+                    subfolder = metadata_file.parent
+                    
+                    if source_path.exists():
+                        discovered_sources.append({
+                            'source_path': source_path,
+                            'metadata_file': metadata_file,
+                            'subfolder': subfolder,
+                            'metadata': metadata
+                        })
                         
-                        source_path = metadata.get('source_document_path')
-                        if source_path:
-                            source_path = Path(source_path)
-                            if source_path.exists():
-                                discovered_sources.append({
-                                    'source_path': source_path,
-                                    'metadata_file': metadata_file,
-                                    'subfolder': subfolder,
-                                    'metadata': metadata
-                                })
-                                
-                                # Add to list widget
-                                item_text = f"{source_path.name} → {subfolder.name}"
-                                self.sources_list.addItem(item_text)
-                            else:
-                                # Source file doesn't exist - add error item
-                                error_text = f"❌ {source_path.name} (FILE NOT FOUND: {source_path})"
-                                error_item = QListWidgetItem(error_text)
-                                error_item.setForeground(QColor('red'))
-                                self.sources_list.addItem(error_item)
-                        
-                    except Exception as e:
-                        print(f"Error reading metadata file {metadata_file}: {e}")
+                        # Add to list widget with relative path for better visibility
+                        relative_path = subfolder.relative_to(index_folder)
+                        item_text = f"{source_path.name} → {relative_path}"
+                        self.sources_list.addItem(item_text)
+                    else:
+                        # Source file doesn't exist - add error item
+                        error_text = f"❌ {source_path.name} (FILE NOT FOUND: {source_path})"
+                        error_item = QListWidgetItem(error_text)
+                        error_item.setForeground(QColor('red'))
+                        self.sources_list.addItem(error_item)
+                
+            except Exception as e:
+                print(f"Error reading metadata file {metadata_file}: {e}")
         
         # Store discovered sources for later use
         self.discovered_sources = discovered_sources
+        
+        # Check for nested indexes
+        self.has_nested_indexes = self._detect_nested_indexes(discovered_sources)
+        if self.has_nested_indexes:
+            print("WARNING: Nested indexes detected!")
         
         # Enable add all button if we found valid sources
         if discovered_sources:
@@ -3680,6 +3687,32 @@ class UpdateIndexDialog(QDialog):
             print(f"DISCOVERED: {len(discovered_sources)} source documents in index folder")
         else:
             self.sources_list.addItem("No valid source documents found in this index folder")
+    
+    def _detect_nested_indexes(self, discovered_sources):
+        """Detect if there are nested indexes (one index inside another)."""
+        if len(discovered_sources) < 2:
+            return False
+        
+        # Check if any subfolder is a parent/child of another
+        subfolders = [source['subfolder'] for source in discovered_sources]
+        
+        for i, folder1 in enumerate(subfolders):
+            for j, folder2 in enumerate(subfolders):
+                if i != j:
+                    # Check if folder1 is inside folder2 or vice versa
+                    try:
+                        folder1.relative_to(folder2)
+                        return True  # folder1 is inside folder2
+                    except ValueError:
+                        pass
+                    
+                    try:
+                        folder2.relative_to(folder1)
+                        return True  # folder2 is inside folder1
+                    except ValueError:
+                        pass
+        
+        return False
     
     def add_all_to_queue(self):
         """Add all discovered source documents to the queue."""
@@ -3689,6 +3722,26 @@ class UpdateIndexDialog(QDialog):
         # Get update mode from Update All tab
         update_mode = "update_all" if self.update_all_rebuild_radio.isChecked() else "add_new"
         check_removed = self.update_all_check_removed_checkbox.isChecked()
+        
+        # Check for nested indexes with problematic settings
+        if hasattr(self, 'has_nested_indexes') and self.has_nested_indexes:
+            if update_mode == "update_all" or check_removed:
+                reply = QMessageBox.warning(
+                    self,
+                    "Nested Indexes Detected",
+                    "This index folder contains nested indexes (indexes within indexes).\n\n"
+                    "Using 'Rebuild Everything' or 'Remove deleted headings' with nested indexes "
+                    "will cause higher-level indexes to overwrite lower-level ones.\n\n"
+                    "To update nested indexes safely, you should:\n"
+                    "• Select 'Add New Only' mode\n"
+                    "• Uncheck 'Remove deleted headings'\n\n"
+                    "Do you want to continue with the current settings anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
         
         added_count = 0
         for source_info in self.discovered_sources:
