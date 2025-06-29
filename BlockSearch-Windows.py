@@ -7,6 +7,7 @@ This utility searches for blocks in an index and sends them to a speech document
 import csv
 import ctypes
 import docx
+import json
 import os
 import re
 import sys
@@ -58,6 +59,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -70,6 +72,8 @@ from PyQt6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QPushButton,
+    QRadioButton,
+    QScrollArea,
     QSplitter,
     QStatusBar,
     QSystemTrayIcon,
@@ -82,8 +86,7 @@ from PyQt6.QtWidgets import (
     QMenu as QTrayMenu, 
     QComboBox,           
     QProgressBar,        
-    QCheckBox,
-    QScrollArea           
+    QCheckBox
 )
 
 @dataclass
@@ -1341,6 +1344,175 @@ class DocxSplitter:
         else:
             return self._save_individual_files(output_dir, preserve_hierarchy)
     
+    def process_document_update(self, output_dir: Path, target_level: int = 3,
+                               preserve_hierarchy: bool = False, skip_existing: bool = True,
+                               progress_callback=None) -> Path:
+        """
+        Process the document for update operations with skip-existing functionality.
+        
+        Args:
+            output_dir: Output directory for files
+            target_level: Heading level to split on (default: 3)
+            preserve_hierarchy: Whether to preserve document hierarchy in folder structure
+            skip_existing: Whether to skip files that already exist
+            progress_callback: Optional callback for detailed progress (current, total, action)
+            
+        Returns:
+            Path: Path to output directory or None if canceled
+        """
+        # Make sure we have parsed sections
+        if not self.sections:
+            self.parse_sections(target_level)
+            
+        # Check if parsing was canceled
+        if self.cancel_requested or not self.sections:
+            return None
+            
+        self.status_callback(f"Processing: Updating {len(self.sections)} sections...")
+        
+        # Create output directory if it doesn't exist
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        return self._save_individual_files_update(output_dir, preserve_hierarchy, skip_existing, progress_callback)
+    
+    def _save_individual_files_update(self, output_dir: Path, preserve_hierarchy: bool = False,
+                                    skip_existing: bool = True, progress_callback=None) -> Path:
+        """Save individual files with update support (skip existing files)."""
+        import concurrent.futures
+        import json
+        from threading import Lock
+        
+        total_sections = len(self.sections)
+        files_created = 0
+        files_skipped = 0
+        progress_lock = Lock()
+        
+        # Initial status update
+        self.status_callback(f"Updating documents: checking {total_sections} sections...")
+        
+        # Function to process a single section
+        def process_section(task):
+            idx, section = task
+            
+            if self.cancel_requested:
+                return None
+                
+            result = {
+                "success": False,
+                "section_title": section.safe_title,
+                "error": None,
+                "output_file": None,
+                "action": "skipped"  # "created" or "skipped"
+            }
+            
+            try:
+                # The filename is simply the safe_title
+                filename = section.safe_title
+                
+                # Determine output path
+                if preserve_hierarchy and section.parent is not None:
+                    folder_components = section.get_path_components()
+                    section_dir = output_dir
+                    
+                    for component in folder_components:
+                        section_dir = section_dir / component
+                        with progress_lock:
+                            section_dir.mkdir(exist_ok=True, parents=True)
+                    
+                    output_file = section_dir / f"{filename}.docx"
+                else:
+                    output_file = output_dir / f"{filename}.docx"
+                
+                # Check if file exists
+                if skip_existing and output_file.exists():
+                    result["success"] = True
+                    result["action"] = "skipped"
+                    result["output_file"] = output_file
+                    print(f"SKIPPED: {section.safe_title} (file already exists)")
+                    return result
+                
+                # File doesn't exist or we're not skipping - create it
+                print(f"CREATING: {section.safe_title}")
+                doc = self._create_section_document(section)
+                
+                # Add metadata
+                metadata = self._add_document_metadata(doc, section, self.sections)
+                
+                # Save document
+                doc.save(str(output_file))
+                
+                # Save metadata file if we have metadata
+                if metadata:
+                    meta_file = output_file.with_suffix(output_file.suffix + '.meta.json')
+                    with open(meta_file, 'w', encoding='utf-8') as f:
+                        json.dump(metadata, f, indent=2)
+                
+                result["success"] = True
+                result["action"] = "created"
+                result["output_file"] = output_file
+                print(f"CREATED: {section.safe_title} -> {output_file}")
+                
+            except Exception as e:
+                result["error"] = str(e)
+                
+            return result
+        
+        # Process sections with progress reporting
+        completed = 0
+        errors = []
+        
+        # Create list of tasks
+        tasks = [(i, section) for i, section in enumerate(self.sections)]
+        
+        # Process sections sequentially for better progress reporting
+        for task in tasks:
+            if self.cancel_requested:
+                break
+                
+            result = process_section(task)
+            
+            if result:
+                if result["success"]:
+                    if result["action"] == "created":
+                        files_created += 1
+                        action_msg = f"Created: {result['section_title']}"
+                    else:
+                        files_skipped += 1
+                        action_msg = f"Skipped: {result['section_title']} (already exists)"
+                        
+                    self.status_callback(action_msg)
+                else:
+                    errors.append(f"Error processing {result['section_title']}: {result['error']}")
+            
+            completed += 1
+            
+            # Update progress
+            percent = int((completed / total_sections) * 100)
+            self.progress_callback(percent)
+            
+            # Call detailed progress callback if provided
+            if progress_callback:
+                progress_callback(completed, total_sections, result.get("action", "unknown"))
+        
+        # Final status update
+        if self.cancel_requested:
+            self.status_callback("Update operation canceled")
+            return None
+        
+        # Report any errors
+        if errors:
+            self.status_callback(f"Update completed with {len(errors)} errors")
+            for error in errors[:5]:  # Show first 5 errors
+                print(error)
+            if len(errors) > 5:
+                print(f"... and {len(errors) - 5} more errors")
+        else:
+            self.status_callback(
+                f"Update completed: {files_created} created, {files_skipped} skipped"
+            )
+        
+        return output_dir
+    
     def _add_document_metadata(self, doc: Document, section: Section, all_sections: List[Section]) -> None:
         """
         Add hierarchy metadata to document custom properties.
@@ -1776,8 +1948,16 @@ class DocxSplitter:
         files_created = 0
         progress_lock = Lock()
         
+        # Create source document subfolder
+        source_doc_name = self.input_path.stem
+        source_doc_folder = output_dir / source_doc_name
+        source_doc_folder.mkdir(parents=True, exist_ok=True)
+        
+        # Create source metadata file
+        self._create_source_metadata_file(source_doc_folder, preserve_hierarchy)
+        
         # Initial status update for document creation phase
-        self.status_callback(f"Creating {total_sections} individual documents using parallel processing...")
+        self.status_callback(f"Creating {total_sections} individual documents in {source_doc_name}/ folder...")
         
         # Function to process a single section in a worker thread
         def process_section(task):
@@ -1805,7 +1985,7 @@ class DocxSplitter:
                 if preserve_hierarchy and section.parent is not None:
                     # Get folder path components
                     folder_components = section.get_path_components()
-                    section_dir = output_dir
+                    section_dir = source_doc_folder  # Use source doc folder as base
                     
                     # Create directories if they don't exist
                     for component in folder_components:
@@ -1819,12 +1999,12 @@ class DocxSplitter:
                     if metadata:
                         meta_file_path = section_dir / f"{section.safe_title}.meta.json"
                 else:
-                    # Flat structure - just save directly to output directory
-                    output_file = output_dir / f"{section.safe_title}.docx"
+                    # Flat structure - save directly to source doc folder
+                    output_file = source_doc_folder / f"{section.safe_title}.docx"
                     
                     # Create metadata file path
                     if metadata:
-                        meta_file_path = output_dir / f"{section.safe_title}.meta.json"
+                        meta_file_path = source_doc_folder / f"{section.safe_title}.meta.json"
                 
                 # Write metadata file if we have metadata
                 if metadata:
@@ -1900,8 +2080,32 @@ class DocxSplitter:
             self.status_callback("Operation canceled while saving files")
             return None
                 
-        self.status_callback(f"Saved {files_created} documents to: {output_dir}")
-        return output_dir
+        self.status_callback(f"Saved {files_created} documents to: {source_doc_folder}")
+        return source_doc_folder
+    
+    def _create_source_metadata_file(self, source_doc_folder: Path, preserve_hierarchy: bool):
+        """Create metadata file with source document information."""
+        source_doc_name = self.input_path.stem
+        metadata_filename = f"{source_doc_name}_metadata.json"
+        metadata_path = source_doc_folder / metadata_filename
+        
+        # Get current heading level from sections
+        heading_level = 3  # Default
+        if self.sections:
+            heading_level = self.sections[0].level
+        
+        metadata = {
+            "source_document_path": str(self.input_path.absolute()),
+            "template_path": str(self.template_path.absolute()),
+            "heading_level": heading_level,
+            "preserve_hierarchy": preserve_hierarchy,
+            "created_timestamp": datetime.now().isoformat()
+        }
+        
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"CREATED METADATA: {metadata_filename}")
 
 class QueueItemWidget(QWidget):
     """Widget to display a queue item with controls."""
@@ -1997,6 +2201,29 @@ class QueueItemWidget(QWidget):
         
         # Update destination field
         self.dest_field.setText(str(self.queue_item.output_dir))
+    
+    def update_status_message(self, message):
+        """Update status display with a custom message."""
+        self.status_label.setText(f"Status: {message}")
+        
+    def update_progress(self, percent):
+        """Update progress bar."""
+        self.progress_bar.setValue(percent)
+        if hasattr(self.queue_item, 'progress'):
+            self.queue_item.progress = percent
+    
+    def set_completed(self, result_path):
+        """Set item as completed."""
+        self.queue_item.status = "completed"
+        self.queue_item.result_path = result_path
+        self.queue_item.progress = 100
+        self.update_status()
+        
+    def set_error(self, error_message):
+        """Set item as error."""
+        self.queue_item.status = "error"
+        self.queue_item.error = error_message
+        self.update_status()
     
     def change_destination(self):
         """Open dialog to change destination directory."""
@@ -2149,7 +2376,7 @@ class AddToIndexDialog(QDialog):
         doc_layout.addWidget(add_button)
         
         # Add document selection tab
-        tab_widget.addTab(doc_selection_tab, "Document Settings")
+        tab_widget.addTab(doc_selection_tab, "Select Document")
         
         # Queue management tab
         queue_tab = QWidget()
@@ -2190,7 +2417,7 @@ class AddToIndexDialog(QDialog):
         queue_layout.addLayout(queue_controls)
         
         # Add queue tab
-        tab_widget.addTab(queue_tab, "Processing Queue")
+        tab_widget.addTab(queue_tab, "Queue")
         
         # Status display
         self.status_text = QLabel("Ready")
@@ -2997,6 +3224,1238 @@ class AddToIndexDialog(QDialog):
         # Save settings before closing
         self.save_settings()
         self.close()  # Now we can close
+
+
+class UpdateIndexDialog(QDialog):
+    """
+    Dialog for updating the document index with two modes:
+    1. Update All - Delete and rebuild from scratch
+    2. Add New Only - Only add headings that don't already exist
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Update Index")
+        self.setMinimumSize(800, 600)
+        
+        # Initialize state variables
+        self.input_path = None
+        self.template_path = None
+        self.output_dir = None
+        self.queue_items = []
+        self.queue_widgets = []
+        self.is_processing = False
+        self.update_mode = "add_new"  # "update_all" or "add_new"
+        self.check_removed = False
+        
+        # Threading components
+        self.worker = None
+        self.worker_thread = None
+        
+        # Get application settings
+        self.settings = QSettings('DocxSearchApp', 'Settings')
+        
+        # Setup UI
+        self.setup_ui()
+        
+        # Load previous settings
+        self.load_settings()
+        
+        # Reference to the current splitter
+        self.current_splitter = None
+    
+    def setup_ui(self):
+        """Initialize the user interface with update-specific options."""
+        layout = QVBoxLayout(self)
+        
+        # Create tab widget for document selection and queue
+        tab_widget = QTabWidget()
+        layout.addWidget(tab_widget)
+        
+        # Document selection tab
+        doc_selection_tab = QWidget()
+        doc_layout = QVBoxLayout(doc_selection_tab)
+        
+        # Update mode selection
+        mode_group = QGroupBox("Update Mode")
+        mode_layout = QVBoxLayout(mode_group)
+        
+        # Warning label for update all mode
+        self.warning_label = QLabel(
+            "⚠️ Warning: 'Update All' will completely overwrite the current contents of the destination folder!"
+        )
+        self.warning_label.setStyleSheet("QLabel { color: #ff6b6b; font-weight: bold; padding: 10px; }")
+        self.warning_label.setWordWrap(True)
+        mode_layout.addWidget(self.warning_label)
+        
+        # Radio buttons for update mode
+        self.update_all_radio = QRadioButton("Rebuild Everything - Delete existing index and recreate from source")
+        self.add_new_radio = QRadioButton("Add New Only - Add new headings, skip existing ones")
+        self.add_new_radio.setChecked(True)  # Default to safer option
+        
+        mode_layout.addWidget(self.update_all_radio)
+        mode_layout.addWidget(self.add_new_radio)
+        
+        # Checkbox for checking removed headings (only enabled for add_new mode)
+        self.check_removed_checkbox = QCheckBox("Remove deleted headings - Remove indexed headings that aren't in the source")
+        self.check_removed_checkbox.setChecked(True)  # Default to checked
+        self.check_removed_checkbox.setToolTip(
+            "When checked, headings that exist in the destination but not in the source will be deleted"
+        )
+        mode_layout.addWidget(self.check_removed_checkbox)
+        
+        # Connect radio buttons to update UI state
+        self.update_all_radio.toggled.connect(self.on_mode_changed)
+        self.add_new_radio.toggled.connect(self.on_mode_changed)
+        
+        doc_layout.addWidget(mode_group)
+        
+        # Input document selection
+        input_group = QFrame()
+        input_layout = QHBoxLayout(input_group)
+        
+        input_label = QLabel("Input Document:")
+        self.input_field = QLineEdit()
+        self.input_field.setReadOnly(True)
+        self.input_field.setPlaceholderText("Select a Word document to process")
+        
+        input_button = QPushButton("Browse...")
+        input_button.clicked.connect(self.browse_input_document)
+        
+        input_layout.addWidget(input_label)
+        input_layout.addWidget(self.input_field, 1)
+        input_layout.addWidget(input_button)
+        
+        doc_layout.addWidget(input_group)
+        
+        # Template document selection
+        template_group = QFrame()
+        template_layout = QHBoxLayout(template_group)
+        
+        template_label = QLabel("Template Document:")
+        self.template_field = QLineEdit()
+        self.template_field.setReadOnly(True)
+        self.template_field.setPlaceholderText("Select a template document (optional)")
+        
+        template_button = QPushButton("Browse...")
+        template_button.clicked.connect(self.browse_template_document)
+        
+        template_layout.addWidget(template_label)
+        template_layout.addWidget(self.template_field, 1)
+        template_layout.addWidget(template_button)
+        
+        doc_layout.addWidget(template_group)
+        
+        # Note: Heading level and hierarchy settings are read from metadata file
+        
+        # Output options
+        output_group = QFrame()
+        output_layout = QHBoxLayout(output_group)
+        
+        output_label = QLabel("Output Directory:")
+        self.output_field = QLineEdit()
+        self.output_field.setReadOnly(True)
+        self.output_field.setPlaceholderText("Select output directory")
+        
+        output_button = QPushButton("Browse...")
+        output_button.clicked.connect(self.browse_output_directory)
+        
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(self.output_field, 1)
+        output_layout.addWidget(output_button)
+        
+        doc_layout.addWidget(output_group)
+        
+        # No additional options needed - hierarchy is auto-detected
+        
+        # Add to queue button
+        self.add_button = QPushButton("Add to Queue")
+        self.add_button.clicked.connect(self.add_to_queue)
+        doc_layout.addWidget(self.add_button)
+        
+        doc_layout.addStretch()
+        
+        # Update All tab
+        update_all_tab = QWidget()
+        update_all_layout = QVBoxLayout(update_all_tab)
+        
+        # Update mode selection (same as main tab)
+        update_all_mode_group = QGroupBox("Update Mode")
+        update_all_mode_layout = QVBoxLayout(update_all_mode_group)
+        
+        # Warning label for update all mode
+        self.update_all_warning_label = QLabel(
+            "⚠️ Warning: 'Rebuild Everything' will completely overwrite the current contents of all source folders!"
+        )
+        self.update_all_warning_label.setStyleSheet("QLabel { color: #ff6b6b; font-weight: bold; padding: 10px; }")
+        self.update_all_warning_label.setWordWrap(True)
+        update_all_mode_layout.addWidget(self.update_all_warning_label)
+        
+        # Radio buttons for update mode (separate from main tab)
+        self.update_all_rebuild_radio = QRadioButton("Rebuild Everything - Delete existing index and recreate from source")
+        self.update_all_add_new_radio = QRadioButton("Add New Only - Add new headings, skip existing ones")
+        self.update_all_add_new_radio.setChecked(True)  # Default to safer option
+        
+        update_all_mode_layout.addWidget(self.update_all_rebuild_radio)
+        update_all_mode_layout.addWidget(self.update_all_add_new_radio)
+        
+        # Checkbox for checking removed headings (only enabled for add_new mode)
+        self.update_all_check_removed_checkbox = QCheckBox("Remove deleted headings - Remove indexed headings that aren't in the source")
+        self.update_all_check_removed_checkbox.setChecked(True)  # Default to checked
+        self.update_all_check_removed_checkbox.setToolTip(
+            "When checked, headings that exist in the destination but not in the source will be deleted"
+        )
+        update_all_mode_layout.addWidget(self.update_all_check_removed_checkbox)
+        
+        # Connect radio buttons to update UI state
+        self.update_all_rebuild_radio.toggled.connect(self.on_update_all_mode_changed)
+        self.update_all_add_new_radio.toggled.connect(self.on_update_all_mode_changed)
+        
+        update_all_layout.addWidget(update_all_mode_group)
+        
+        # Index folder selection
+        index_folder_group = QFrame()
+        index_folder_layout = QHBoxLayout(index_folder_group)
+        
+        index_folder_label = QLabel("Index Folder:")
+        self.index_folder_field = QLineEdit()
+        self.index_folder_field.setReadOnly(True)
+        self.index_folder_field.setPlaceholderText("Select the index folder to update")
+        
+        index_folder_button = QPushButton("Browse...")
+        index_folder_button.clicked.connect(self.browse_index_folder)
+        
+        index_folder_layout.addWidget(index_folder_label)
+        index_folder_layout.addWidget(self.index_folder_field, 1)
+        index_folder_layout.addWidget(index_folder_button)
+        
+        update_all_layout.addWidget(index_folder_group)
+        
+        # Source documents display
+        sources_group = QGroupBox("Discovered Source Documents")
+        sources_layout = QVBoxLayout(sources_group)
+        
+        self.sources_list = QListWidget()
+        self.sources_list.setMinimumHeight(200)
+        sources_layout.addWidget(self.sources_list)
+        
+        # Add all to queue button
+        self.add_all_button = QPushButton("Add All to Queue")
+        self.add_all_button.clicked.connect(self.add_all_to_queue)
+        self.add_all_button.setEnabled(False)
+        sources_layout.addWidget(self.add_all_button)
+        
+        update_all_layout.addWidget(sources_group)
+        update_all_layout.addStretch()
+        
+        tab_widget.addTab(update_all_tab, "Update All")
+        
+        tab_widget.addTab(doc_selection_tab, "Update by Document")
+        
+        # Queue management tab
+        queue_tab = QWidget()
+        queue_layout = QVBoxLayout(queue_tab)
+        
+        # Queue list
+        queue_label = QLabel("Processing Queue:")
+        queue_layout.addWidget(queue_label)
+        
+        # Scroll area for queue items
+        self.queue_scroll = QScrollArea()
+        self.queue_scroll.setWidgetResizable(True)
+        self.queue_container = QWidget()
+        self.queue_container_layout = QVBoxLayout(self.queue_container)
+        self.queue_container_layout.addStretch()
+        self.queue_scroll.setWidget(self.queue_container)
+        queue_layout.addWidget(self.queue_scroll)
+        
+        # Queue control buttons
+        queue_controls = QHBoxLayout()
+        
+        self.clear_completed_button = QPushButton("Clear Completed")
+        self.clear_completed_button.clicked.connect(self.clear_completed_items)
+        queue_controls.addWidget(self.clear_completed_button)
+        
+        self.clear_queue_button = QPushButton("Clear All")
+        self.clear_queue_button.clicked.connect(self.clear_queue)
+        queue_controls.addWidget(self.clear_queue_button)
+        
+        queue_controls.addStretch()
+        
+        self.start_queue_button = QPushButton("Start Processing Queue")
+        self.start_queue_button.clicked.connect(self.start_processing_queue)
+        queue_controls.addWidget(self.start_queue_button)
+        
+        queue_layout.addLayout(queue_controls)
+        
+        tab_widget.addTab(queue_tab, "Queue")
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+        
+        # Status label
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
+        
+        # Dialog buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # Update UI state based on initial mode
+        self.on_mode_changed()
+        self.on_update_all_mode_changed()
+    
+    def on_mode_changed(self):
+        """Handle update mode change."""
+        if self.update_all_radio.isChecked():
+            self.update_mode = "update_all"
+            self.check_removed_checkbox.setEnabled(False)
+            self.check_removed_checkbox.setChecked(False)
+            self.warning_label.setVisible(True)
+        else:
+            self.update_mode = "add_new"
+            self.check_removed_checkbox.setEnabled(True)
+            self.warning_label.setVisible(False)
+    
+    def on_update_all_mode_changed(self):
+        """Handle update all mode change."""
+        if self.update_all_rebuild_radio.isChecked():
+            self.update_all_check_removed_checkbox.setEnabled(False)
+            self.update_all_check_removed_checkbox.setChecked(False)
+            self.update_all_warning_label.setVisible(True)
+        else:
+            self.update_all_check_removed_checkbox.setEnabled(True)
+            self.update_all_warning_label.setVisible(False)
+    
+    def browse_index_folder(self):
+        """Open directory dialog to select index folder."""
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Index Folder",
+            self.settings.value('last_index_dir', ''),
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if dir_path:
+            self.index_folder_field.setText(dir_path)
+            self.settings.setValue('last_index_dir', dir_path)
+            self._discover_source_documents(Path(dir_path))
+    
+    def _discover_source_documents(self, index_folder):
+        """Discover source documents in the index folder by scanning for metadata files."""
+        self.sources_list.clear()
+        self.add_all_button.setEnabled(False)
+        
+        if not index_folder.exists():
+            return
+        
+        discovered_sources = []
+        
+        # Look for subdirectories that contain metadata files
+        for subfolder in index_folder.iterdir():
+            if subfolder.is_dir():
+                # Look for metadata files in this subfolder
+                metadata_files = list(subfolder.glob("*_metadata.json"))
+                for metadata_file in metadata_files:
+                    try:
+                        with open(metadata_file, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                        
+                        source_path = metadata.get('source_document_path')
+                        if source_path:
+                            source_path = Path(source_path)
+                            if source_path.exists():
+                                discovered_sources.append({
+                                    'source_path': source_path,
+                                    'metadata_file': metadata_file,
+                                    'subfolder': subfolder,
+                                    'metadata': metadata
+                                })
+                                
+                                # Add to list widget
+                                item_text = f"{source_path.name} → {subfolder.name}"
+                                self.sources_list.addItem(item_text)
+                            else:
+                                # Source file doesn't exist - add error item
+                                error_text = f"❌ {source_path.name} (FILE NOT FOUND: {source_path})"
+                                error_item = QListWidgetItem(error_text)
+                                error_item.setForeground(QColor('red'))
+                                self.sources_list.addItem(error_item)
+                        
+                    except Exception as e:
+                        print(f"Error reading metadata file {metadata_file}: {e}")
+        
+        # Store discovered sources for later use
+        self.discovered_sources = discovered_sources
+        
+        # Enable add all button if we found valid sources
+        if discovered_sources:
+            self.add_all_button.setEnabled(True)
+            print(f"DISCOVERED: {len(discovered_sources)} source documents in index folder")
+        else:
+            self.sources_list.addItem("No valid source documents found in this index folder")
+    
+    def add_all_to_queue(self):
+        """Add all discovered source documents to the queue."""
+        if not hasattr(self, 'discovered_sources'):
+            return
+        
+        # Get update mode from Update All tab
+        update_mode = "update_all" if self.update_all_rebuild_radio.isChecked() else "add_new"
+        check_removed = self.update_all_check_removed_checkbox.isChecked()
+        
+        added_count = 0
+        for source_info in self.discovered_sources:
+            try:
+                metadata = source_info['metadata']
+                
+                # Create queue item from metadata
+                queue_item = SplitQueueItem(
+                    input_path=source_info['source_path'],
+                    template_path=Path(metadata.get('template_path', '')),
+                    output_dir=source_info['subfolder'],
+                    heading_level=metadata.get('heading_level', 3),
+                    preserve_hierarchy=metadata.get('preserve_hierarchy', False),
+                    create_zip=False
+                )
+                
+                # Add update-specific attributes
+                queue_item.update_mode = update_mode
+                queue_item.check_removed = check_removed
+                
+                # Add to queue
+                self.queue_items.append(queue_item)
+                
+                # Create widget for queue item
+                item_widget = QueueItemWidget(queue_item, len(self.queue_items) - 1)
+                item_widget.destination_changed.connect(self.on_destination_changed)
+                item_widget.remove_requested.connect(self.remove_queue_item)
+                
+                self.queue_widgets.append(item_widget)
+                
+                # Add to UI (before the stretch)
+                self.queue_container_layout.insertWidget(
+                    self.queue_container_layout.count() - 1,
+                    item_widget
+                )
+                
+                added_count += 1
+                
+            except Exception as e:
+                print(f"Error adding {source_info['source_path']} to queue: {e}")
+        
+        self.update_status(f"Added {added_count} source documents to queue")
+        
+        # Switch to Queue tab to show the results
+        self.parent().findChild(QTabWidget).setCurrentIndex(2)  # Queue tab is index 2
+    
+    def browse_input_document(self):
+        """Open file dialog to select input document."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Input Document",
+            self.settings.value('last_input_dir', ''),
+            "Word Documents (*.docx)"
+        )
+        
+        if file_path:
+            self.input_path = Path(file_path)
+            self.input_field.setText(str(self.input_path))
+            self.settings.setValue('last_input_dir', str(self.input_path.parent))
+    
+    def browse_template_document(self):
+        """Open file dialog to select template document."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Template Document",
+            self.settings.value('last_template_dir', ''),
+            "Word Documents (*.docx)"
+        )
+        
+        if file_path:
+            self.template_path = Path(file_path)
+            self.template_field.setText(str(self.template_path))
+            self.settings.setValue('last_template_dir', str(self.template_path.parent))
+    
+    def browse_output_directory(self):
+        """Open directory dialog to select output directory."""
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            self.settings.value('last_output_dir', ''),
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if dir_path:
+            self.output_dir = Path(dir_path)
+            self.output_field.setText(str(self.output_dir))
+            self.settings.setValue('last_output_dir', str(self.output_dir))
+    
+    def add_to_queue(self):
+        """Add current configuration to processing queue."""
+        # Validate inputs
+        if not self.input_path:
+            QMessageBox.warning(self, "Missing Input", "Please select an input document.")
+            return
+        
+        if not self.template_path:
+            QMessageBox.warning(self, "Missing Template", "Please select a template document.")
+            return
+        
+        if not self.output_dir:
+            QMessageBox.warning(self, "Missing Output", "Please select an output directory.")
+            return
+        
+        # Validate that output directory has proper metadata structure
+        if not self._validate_output_directory():
+            return
+        
+        # Read settings from metadata file
+        heading_level, preserve_hierarchy = self._read_metadata_settings()
+        
+        # Create queue item with update-specific settings
+        queue_item = SplitQueueItem(
+            input_path=self.input_path,
+            template_path=self.template_path,
+            output_dir=self.output_dir,
+            heading_level=heading_level,
+            preserve_hierarchy=preserve_hierarchy,
+            create_zip=False  # Always False for updates
+        )
+        
+        # Add update-specific attributes
+        queue_item.update_mode = self.update_mode
+        queue_item.check_removed = self.check_removed_checkbox.isChecked()
+        
+        # Add to queue
+        self.queue_items.append(queue_item)
+        
+        # Create widget for queue item
+        item_widget = QueueItemWidget(queue_item, len(self.queue_items) - 1)
+        item_widget.destination_changed.connect(self.on_destination_changed)
+        item_widget.remove_requested.connect(self.remove_queue_item)
+        
+        self.queue_widgets.append(item_widget)
+        
+        # Add to UI (before the stretch)
+        self.queue_container_layout.insertWidget(
+            self.queue_container_layout.count() - 1,
+            item_widget
+        )
+        
+        # Update status
+        self.update_status(f"Added {queue_item.display_name} to queue")
+        
+        # Clear inputs for next item
+        self.clear_inputs()
+    
+    def _read_metadata_settings(self):
+        """
+        Read heading level and preserve hierarchy settings from metadata file.
+        Returns (heading_level, preserve_hierarchy) tuple.
+        """
+        if not self.output_dir or not self.output_dir.exists():
+            return 3, False  # Default values
+        
+        # Find metadata file
+        metadata_files = list(self.output_dir.glob("*_metadata.json"))
+        if not metadata_files:
+            print("No metadata file found, using defaults")
+            return 3, False
+        
+        try:
+            with open(metadata_files[0], 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            
+            heading_level = metadata.get('heading_level', 3)
+            preserve_hierarchy = metadata.get('preserve_hierarchy', False)
+            
+            print(f"READ METADATA: heading_level={heading_level}, preserve_hierarchy={preserve_hierarchy}")
+            return heading_level, preserve_hierarchy
+            
+        except Exception as e:
+            print(f"Error reading metadata file: {e}")
+            return 3, False  # Default values
+    
+    def _validate_output_directory(self):
+        """
+        Validate that the output directory has metadata files in the root.
+        For Update Document mode, we expect one metadata file in the root directory.
+        """
+        if not self.output_dir or not self.output_dir.exists():
+            QMessageBox.critical(
+                self,
+                "Invalid Output Directory",
+                "The selected output directory does not exist."
+            )
+            return False
+        
+        # Check for metadata files in the root directory
+        metadata_files = list(self.output_dir.glob("*_metadata.json"))
+        
+        if not metadata_files:
+            QMessageBox.critical(
+                self,
+                "No Metadata Files Found",
+                "This directory does not contain any metadata files (*_metadata.json).\n\n"
+                "The Update Document feature requires a folder with a metadata file. "
+                "Please re-create the index folder using 'Add Files to Index'.",
+                QMessageBox.StandardButton.Ok
+            )
+            return False
+        
+        print(f"FOUND {len(metadata_files)} metadata files in root directory")
+        return True
+    
+    def clear_inputs(self):
+        """Clear input fields after adding to queue."""
+        self.input_path = None
+        self.input_field.clear()
+        # Don't clear template and output as they're often reused
+    
+    def clear_queue(self):
+        """Clear all items from the queue."""
+        if self.is_processing:
+            QMessageBox.warning(self, "Processing Active", 
+                              "Cannot clear queue while processing is active.")
+            return
+        
+        # Clear UI
+        for widget in self.queue_widgets:
+            widget.deleteLater()
+        
+        # Clear data
+        self.queue_items.clear()
+        self.queue_widgets.clear()
+        
+        self.update_status("Queue cleared")
+    
+    def clear_completed_items(self):
+        """Remove completed items from the queue."""
+        if self.is_processing:
+            QMessageBox.warning(self, "Processing Active", 
+                              "Cannot modify queue while processing is active.")
+            return
+        
+        # Find completed items
+        completed_indexes = []
+        for i, item in enumerate(self.queue_items):
+            if item.status == "completed":
+                completed_indexes.append(i)
+        
+        # Remove in reverse order to maintain indexes
+        for i in reversed(completed_indexes):
+            self.queue_widgets[i].deleteLater()
+            del self.queue_widgets[i]
+            del self.queue_items[i]
+        
+        # Update remaining widget indexes
+        for i, widget in enumerate(self.queue_widgets):
+            widget.index = i
+        
+        if completed_indexes:
+            self.update_status(f"Removed {len(completed_indexes)} completed items")
+    
+    def remove_queue_item(self, index):
+        """Remove a specific item from the queue."""
+        if self.is_processing:
+            QMessageBox.warning(self, "Processing Active", 
+                              "Cannot modify queue while processing is active.")
+            return
+        
+        if 0 <= index < len(self.queue_items):
+            # Remove widget
+            self.queue_widgets[index].deleteLater()
+            del self.queue_widgets[index]
+            del self.queue_items[index]
+            
+            # Update remaining widget indexes
+            for i, widget in enumerate(self.queue_widgets):
+                widget.index = i
+            
+            self.update_status(f"Removed item #{index+1}")
+    
+    def on_destination_changed(self, index, new_path):
+        """Handle destination change for a queue item."""
+        if 0 <= index < len(self.queue_items):
+            self.queue_items[index].output_dir = Path(new_path)
+            self.update_status(f"Changed destination for item #{index+1}")
+    
+    def start_processing_queue(self):
+        """Start or resume processing the queue with update-specific logic."""
+        if self.is_processing:
+            # Cancel processing
+            self.cancel_processing()
+            return
+        
+        # Find first non-completed item
+        start_index = 0
+        for i, item in enumerate(self.queue_items):
+            if item.status != "completed":
+                start_index = i
+                break
+        else:
+            # All items completed
+            QMessageBox.information(self, "Queue Complete", 
+                                  "All items in the queue have been processed.")
+            return
+        
+        # Confirm update all operations
+        update_all_items = [item for item in self.queue_items if hasattr(item, 'update_mode') and item.update_mode == "update_all"]
+        if update_all_items:
+            msg = f"You have {len(update_all_items)} 'Update All' operations in the queue.\n\n"
+            msg += "These will COMPLETELY DELETE and rebuild the contents of their destination folders.\n\n"
+            msg += "Are you sure you want to proceed?"
+            
+            reply = QMessageBox.warning(
+                self,
+                "Confirm Update All Operations",
+                msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        
+        self.is_processing = True
+        self.start_queue_button.setText("Cancel Processing")
+        self.progress_bar.setVisible(True)
+        
+        # Create worker thread with update support
+        self.worker_thread = QThread()
+        self.worker = UpdateIndexWorker(self.queue_items, start_index)
+        self.worker.moveToThread(self.worker_thread)
+        
+        # Connect signals
+        self.worker_thread.started.connect(self.worker.process_queue)
+        self.worker.status_changed.connect(self.on_worker_status_changed)
+        self.worker.progress_updated.connect(self.on_worker_progress_updated)
+        self.worker.item_completed.connect(self.on_worker_item_completed)
+        self.worker.item_error.connect(self.on_worker_item_error)
+        self.worker.all_completed.connect(self.on_processing_complete)
+        
+        # Start processing
+        self.worker_thread.start()
+        self.update_status(f"Started processing queue at item #{start_index+1}")
+    
+    def cancel_processing(self):
+        """Cancel the current processing operation."""
+        if self.worker:
+            self.worker.cancel()
+            self.update_status("Canceling operation...")
+    
+    def on_worker_status_changed(self, index, message):
+        """Handle status change from worker thread."""
+        if 0 <= index < len(self.queue_widgets):
+            self.queue_widgets[index].update_status_message(message)
+    
+    def on_worker_progress_updated(self, index, percent):
+        """Handle progress update from worker thread."""
+        if 0 <= index < len(self.queue_widgets):
+            self.queue_widgets[index].update_progress(percent)
+        self.progress_bar.setValue(percent)
+    
+    def on_worker_item_completed(self, index, result_path, status):
+        """Handle item completion from worker thread."""
+        if 0 <= index < len(self.queue_items):
+            self.queue_items[index].status = "completed"
+            self.queue_items[index].result_path = result_path
+            
+            if 0 <= index < len(self.queue_widgets):
+                self.queue_widgets[index].set_completed(str(result_path))
+            
+            self.update_status(f"Completed processing {self.queue_items[index].display_name}")
+    
+    def on_worker_item_error(self, index, error_message):
+        """Handle item error from worker thread."""
+        if 0 <= index < len(self.queue_items):
+            self.queue_items[index].status = "error"
+            
+            if 0 <= index < len(self.queue_widgets):
+                self.queue_widgets[index].set_error(error_message)
+            
+            self.update_status(f"Error processing {self.queue_items[index].display_name}: {error_message}")
+    
+    def on_processing_complete(self):
+        """Handle completion of all queue processing."""
+        self.is_processing = False
+        self.start_queue_button.setText("Start Processing Queue")
+        self.progress_bar.setVisible(False)
+        self.update_status("Queue processing complete")
+        
+        # Refresh the main window's index if needed
+        if self.parent() and hasattr(self.parent(), 'index_documents'):
+            self.parent().index_documents()
+        
+        # Clean up worker
+        if self.worker_thread:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+            self.worker_thread.deleteLater()
+            self.worker_thread = None
+        
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
+    
+    def update_status(self, message):
+        """Update the status label."""
+        self.status_label.setText(message)
+    
+    def load_settings(self):
+        """Load saved settings."""
+        # Load template path if saved
+        template_path = self.settings.value('last_template_path', '')
+        if template_path and Path(template_path).exists():
+            self.template_path = Path(template_path)
+            self.template_field.setText(str(self.template_path))
+        
+        # Note: Heading level is now read from metadata file
+    
+    def save_settings(self):
+        """Save current settings."""
+        if self.template_path:
+            self.settings.setValue('last_template_path', str(self.template_path))
+        
+        # Note: Heading level is now read from metadata file
+    
+    def reject(self):
+        """Handle dialog rejection."""
+        if self.is_processing:
+            reply = QMessageBox.question(
+                self,
+                "Processing Active",
+                "Processing is still active. Do you want to cancel and close?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.cancel_processing()
+                # Wait a moment for cancellation
+                QTimer.singleShot(100, self.force_close)
+            return
+        
+        self.save_settings()
+        super().reject()
+    
+    def force_close(self):
+        """Force close after cancellation."""
+        if self.worker:
+            self.worker.is_cancelled = True
+        if self.worker_thread and self.worker_thread.isRunning():
+            self.worker_thread.terminate()
+            self.worker_thread.wait()
+        
+        self.save_settings()
+        self.done(0)
+
+
+class UpdateIndexWorker(DocxSplitterWorker):
+    """
+    Enhanced worker class for update operations that supports:
+    - Update All mode (delete and rebuild)
+    - Add New Only mode (skip existing files)
+    - Check for removed headings option
+    """
+    
+    def process_queue(self):
+        """Process the queue with update-specific logic."""
+        self.is_running = True
+        
+        for index in range(self.current_index, len(self.queue_items)):
+            if self.is_cancelled:
+                break
+            
+            self.current_index = index
+            queue_item = self.queue_items[index]
+            
+            try:
+                # Update status
+                queue_item.status = "processing"
+                self.status_changed.emit(index, "Processing...")
+                
+                # Get update mode and settings
+                update_mode = getattr(queue_item, 'update_mode', 'add_new')
+                check_removed = getattr(queue_item, 'check_removed', False)
+                
+                # Process based on update mode
+                if update_mode == "update_all":
+                    self._process_update_all(queue_item, index)
+                else:
+                    self._process_add_new_only(queue_item, index, check_removed)
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"Error processing item {index}: {error_msg}")
+                import traceback
+                traceback.print_exc()
+                self.item_error.emit(index, error_msg)
+        
+        self.is_running = False
+        self.all_completed.emit()
+    
+    def _process_update_all(self, queue_item, index):
+        """Process update all mode - delete EVERYTHING and rebuild from scratch."""
+        try:
+            # Step 1: Delete ALL files and directories in the output directory
+            self.status_changed.emit(index, "Deleting all existing content...")
+            
+            if queue_item.output_dir.exists():
+                # Get all files and directories
+                all_items = list(queue_item.output_dir.rglob("*"))
+                all_files = [item for item in all_items if item.is_file()]
+                all_dirs = [item for item in all_items if item.is_dir()]
+                
+                total_items = len(all_files)
+                print(f"UPDATE ALL: Deleting ALL {total_items} files and {len(all_dirs)} directories")
+                
+                # Delete all files first
+                for i, file in enumerate(all_files):
+                    if self.is_cancelled:
+                        return
+                    
+                    try:
+                        file.unlink()
+                        print(f"DELETED: {file.relative_to(queue_item.output_dir)}")
+                    except Exception as e:
+                        print(f"ERROR DELETING: {file}: {e}")
+                    
+                    # Update progress (files deletion takes 20% of total progress)
+                    percent = int((i + 1) / total_items * 20) if total_items > 0 else 20
+                    self.progress_updated.emit(index, percent)
+                
+                # Delete all directories (deepest first)
+                for directory in sorted(all_dirs, key=lambda d: len(d.parts), reverse=True):
+                    if self.is_cancelled:
+                        return
+                    
+                    try:
+                        if directory.exists():
+                            directory.rmdir()
+                            print(f"DELETED DIRECTORY: {directory.relative_to(queue_item.output_dir)}")
+                    except Exception as e:
+                        # Directory might not be empty, which is fine
+                        pass
+            
+            # Step 2: Rebuild from scratch using standard processing
+            self.status_changed.emit(index, "Rebuilding index from source...")
+            
+            # Create splitter
+            splitter = DocxSplitter(
+                input_path=queue_item.input_path,
+                template_path=queue_item.template_path,
+                status_callback=lambda msg: self.status_changed.emit(index, msg),
+                progress_callback=lambda percent: self.progress_updated.emit(
+                    index, 20 + int(percent * 80 / 100)  # Use remaining 80% for rebuild
+                )
+            )
+            
+            # Parse sections
+            splitter.parse_sections(queue_item.heading_level)
+            
+            if not splitter.sections:
+                raise ValueError(f"No sections found at heading level {queue_item.heading_level}")
+            
+            print(f"UPDATE ALL: Rebuilding {len(splitter.sections)} sections from scratch")
+            
+            # Process document using standard method (no skip-existing logic needed)
+            # For update all, we need to output to the parent directory so the new
+            # source subfolder structure can be created properly
+            parent_dir = queue_item.output_dir.parent
+            result = splitter.process_document(
+                output_dir=parent_dir,
+                target_level=queue_item.heading_level,
+                create_zip=False,  # Always False for updates
+                preserve_hierarchy=queue_item.preserve_hierarchy
+            )
+            
+            if result:
+                self.item_completed.emit(index, result, "completed")
+            else:
+                raise ValueError("Document processing failed")
+            
+        except Exception as e:
+            raise Exception(f"Update all failed: {str(e)}")
+    
+    def _process_add_new_only(self, queue_item, index, check_removed):
+        """Process add new only mode - skip existing files."""
+        try:
+            # Create splitter with skip-existing functionality
+            splitter = DocxSplitter(
+                input_path=queue_item.input_path,
+                template_path=queue_item.template_path,
+                status_callback=lambda msg: self._status_callback_with_index(index, msg),
+                progress_callback=lambda percent: self._progress_callback_with_offset(index, percent, 0)
+            )
+            
+            # Parse sections
+            self.status_changed.emit(index, f"Parsing sections at level {queue_item.heading_level}...")
+            splitter.parse_sections(queue_item.heading_level)
+            
+            if not splitter.sections:
+                raise ValueError(f"No sections found at heading level {queue_item.heading_level}")
+            
+            # Step 1: Handle file movement if preserve_hierarchy is enabled
+            if queue_item.preserve_hierarchy and queue_item.output_dir.exists():
+                self._reorganize_files_for_hierarchy(queue_item, index, splitter)
+            
+            # Get list of existing files if checking for removed
+            existing_files = set()
+            if check_removed and queue_item.output_dir.exists():
+                # Get all docx files in the output directory
+                for file in queue_item.output_dir.glob("**/*.docx"):
+                    existing_files.add(file.name)
+            
+            # Process document with skip-existing mode
+            result = splitter.process_document_update(
+                output_dir=queue_item.output_dir,
+                target_level=queue_item.heading_level,
+                preserve_hierarchy=queue_item.preserve_hierarchy,
+                skip_existing=True,
+                progress_callback=lambda current, total, action: self._update_progress_callback(index, current, total, action)
+            )
+            
+            if result:
+                # Check for removed headings if requested
+                if check_removed and existing_files:
+                    self._check_removed_headings(queue_item, index, splitter, existing_files)
+                
+                self.item_completed.emit(index, result, "completed")
+            else:
+                raise ValueError("Document processing failed")
+            
+        except Exception as e:
+            raise Exception(f"Add new only failed: {str(e)}")
+    
+    def _reorganize_files_for_hierarchy(self, queue_item, index, splitter):
+        """
+        Reorganize existing files to match new folder structure based on updated hierarchy.
+        This handles cases where the document structure has changed.
+        """
+        self.status_changed.emit(index, "Reorganizing files for updated hierarchy...")
+        
+        # Map existing files to their expected new locations
+        files_to_move = []
+        
+        # Get all existing docx files
+        existing_files = list(queue_item.output_dir.glob("**/*.docx"))
+        
+        for existing_file in existing_files:
+            # Try to match existing file to a section
+            for section in splitter.sections:
+                # The filename is simply the safe_title
+                filename = section.safe_title
+                
+                # Check if this is the same file (by filename without path)
+                if existing_file.name == f"{filename}.docx":
+                    # Determine new path
+                    if section.parent is not None:
+                        folder_components = section.get_path_components()
+                        new_dir = queue_item.output_dir
+                        
+                        for component in folder_components:
+                            new_dir = new_dir / component
+                        
+                        new_path = new_dir / existing_file.name
+                    else:
+                        new_path = queue_item.output_dir / existing_file.name
+                    
+                    # Check if file needs to be moved
+                    if existing_file != new_path:
+                        files_to_move.append((existing_file, new_path))
+                    break
+        
+        # Move files to new locations
+        if files_to_move:
+            self.status_changed.emit(index, f"Moving {len(files_to_move)} files to new locations...")
+            print(f"REORGANIZING: Moving {len(files_to_move)} files for updated hierarchy")
+            
+            for old_path, new_path in files_to_move:
+                try:
+                    # Create target directory if needed
+                    new_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Move the file
+                    old_path.rename(new_path)
+                    print(f"MOVED: {old_path.name} -> {new_path}")
+                    
+                    # Move associated metadata file if it exists
+                    old_meta = old_path.with_suffix(old_path.suffix + '.meta.json')
+                    if old_meta.exists():
+                        new_meta = new_path.with_suffix(new_path.suffix + '.meta.json')
+                        old_meta.rename(new_meta)
+                        print(f"MOVED METADATA: {old_meta.name} -> {new_meta}")
+                    
+                except Exception as e:
+                    print(f"ERROR MOVING: {old_path} to {new_path}: {e}")
+            
+            # Clean up empty directories
+            self._cleanup_empty_directories(queue_item.output_dir)
+    
+    def _cleanup_empty_directories(self, root_dir):
+        """Remove empty subdirectories."""
+        for dirpath in sorted(root_dir.rglob("*"), reverse=True):
+            if dirpath.is_dir():
+                try:
+                    if not any(dirpath.iterdir()):
+                        dirpath.rmdir()
+                except Exception:
+                    pass
+    
+    def _cleanup_directories_thoroughly(self, root_dir, directories_to_check):
+        """
+        Thoroughly clean up directories that may have become empty after file removal.
+        Works bottom-up to ensure all empty parent directories are removed.
+        """
+        # Add all parent directories up to the root to the check list
+        all_dirs_to_check = set(directories_to_check)
+        for directory in directories_to_check:
+            current = directory
+            while current != root_dir and current.parent != current:
+                current = current.parent
+                if current != root_dir:
+                    all_dirs_to_check.add(current)
+        
+        # Sort in reverse order (deepest first) to remove from bottom up
+        sorted_dirs = sorted(all_dirs_to_check, key=lambda d: len(d.parts), reverse=True)
+        
+        for directory in sorted_dirs:
+            try:
+                if directory.exists() and directory.is_dir():
+                    # Check if directory is empty (no files or subdirectories)
+                    contents = list(directory.iterdir())
+                    if not contents:
+                        directory.rmdir()
+                        print(f"REMOVED EMPTY DIRECTORY: {directory.relative_to(root_dir)}")
+            except Exception as e:
+                # Directory might not be empty or might have permission issues
+                # This is normal, so we don't print errors unless it's unexpected
+                pass
+    
+    def _check_removed_headings(self, queue_item, index, splitter, existing_files):
+        """Check for and remove headings that no longer exist in the source."""
+        self.status_changed.emit(index, "Checking for removed headings...")
+        
+        # Get list of current section filenames
+        current_filenames = set()
+        for section in splitter.sections:
+            # The filename is simply the safe_title
+            filename = section.safe_title
+            current_filenames.add(filename + ".docx")
+        
+        # Find files that exist but are no longer in the source
+        removed_files = existing_files - current_filenames
+        
+        if removed_files:
+            self.status_changed.emit(index, f"Removing {len(removed_files)} obsolete files...")
+            print(f"REMOVING OBSOLETE: {len(removed_files)} files no longer in source")
+            
+            # Keep track of directories that might become empty
+            directories_to_check = set()
+            
+            for filename in removed_files:
+                # Find the file in the output directory
+                for file in queue_item.output_dir.rglob(filename):
+                    try:
+                        # Remember the parent directory for cleanup check
+                        if file.parent != queue_item.output_dir:
+                            directories_to_check.add(file.parent)
+                        
+                        # Delete the file
+                        file.unlink()
+                        print(f"REMOVED: {filename} (no longer in source)")
+                        
+                        # Delete associated metadata files
+                        # Check for both .docx.meta.json and .meta.json formats
+                        meta_file1 = file.with_suffix(file.suffix + '.meta.json')
+                        meta_file2 = file.with_suffix('.meta.json')
+                        
+                        for meta_file in [meta_file1, meta_file2]:
+                            if meta_file.exists():
+                                meta_file.unlink()
+                                print(f"REMOVED METADATA: {meta_file.name}")
+                        
+                        # Also look for any other metadata files that might be related
+                        # (in case there are other naming conventions)
+                        stem = file.stem
+                        for meta_file in file.parent.glob(f"{stem}*.meta.json"):
+                            try:
+                                meta_file.unlink()
+                                print(f"REMOVED METADATA: {meta_file.name}")
+                            except Exception as e:
+                                print(f"ERROR REMOVING METADATA: {meta_file}: {e}")
+                        
+                    except Exception as e:
+                        print(f"ERROR REMOVING: {file}: {e}")
+            
+            # Clean up empty directories after removing files
+            if directories_to_check:
+                print(f"CLEANUP: Checking {len(directories_to_check)} directories for cleanup")
+                self._cleanup_directories_thoroughly(queue_item.output_dir, directories_to_check)
+    
+    def _status_callback_with_index(self, index, message):
+        """Status callback that includes the index."""
+        self.status_changed.emit(index, message)
+    
+    def _progress_callback_with_offset(self, index, percent, offset):
+        """Progress callback with offset for multi-step operations."""
+        adjusted_percent = offset + int(percent * (100 - offset) / 100)
+        self.progress_updated.emit(index, adjusted_percent)
+    
+    def _update_progress_callback(self, index, current, total, action):
+        """Enhanced progress callback that shows what action is being taken."""
+        percent = int(current / total * 100) if total > 0 else 0
+        self.progress_updated.emit(index, percent)
+        
+        # Update status to show current action
+        section_name = self.queue_items[index].input_path.stem
+        if current <= total:
+            self.status_changed.emit(index, f"Processing {current}/{total}: {action}")
+    
+    def _process_document(self, queue_item, index, progress_offset=0):
+        """Process document with progress reporting."""
+        try:
+            # Create splitter
+            splitter = DocxSplitter(
+                input_path=queue_item.input_path,
+                template_path=queue_item.template_path,
+                status_callback=lambda msg: self.status_changed.emit(index, msg),
+                progress_callback=lambda percent: self.progress_updated.emit(
+                    index, progress_offset + int(percent * (100 - progress_offset) / 100)
+                )
+            )
+            
+            self.current_splitter = splitter
+            
+            # Parse sections
+            splitter.parse_sections(queue_item.heading_level)
+            
+            if not splitter.sections:
+                raise ValueError(f"No sections found at heading level {queue_item.heading_level}")
+            
+            # Process document
+            result = splitter.process_document(
+                output_dir=queue_item.output_dir,
+                target_level=queue_item.heading_level,
+                create_zip=False,  # Always False for updates
+                preserve_hierarchy=queue_item.preserve_hierarchy
+            )
+            
+            if result:
+                self.item_completed.emit(index, result, "completed")
+            else:
+                raise ValueError("Document processing failed")
+            
+        except Exception as e:
+            raise
+        finally:
+            self.current_splitter = None
+
 
 class PrefixManager:
     """
@@ -4847,6 +6306,13 @@ class DocxSearchApp(QMainWindow):
         dialog.exec()
         
         # Refresh document index if the output is in the search folder
+    
+    def show_update_index(self):
+        """Show the dialog to update the document index."""
+        dialog = UpdateIndexDialog(self)
+        dialog.exec()
+        
+        # The dialog will refresh the index when processing completes
         
     # update_index method has been removed
     
@@ -5226,6 +6692,10 @@ class DocxSearchApp(QMainWindow):
         # Add Files to Index
         add_to_index_action = index_menu.addAction('Add Files to Index...')
         add_to_index_action.triggered.connect(self.show_document_splitter)
+        
+        # Update Index
+        update_index_action = index_menu.addAction('Update Index...')
+        update_index_action.triggered.connect(self.show_update_index)
         
         # Target document menu
         target_menu = menubar.addMenu('Send to Closed Doc')
