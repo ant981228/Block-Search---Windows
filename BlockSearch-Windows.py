@@ -410,6 +410,7 @@ class HelpDialog(QDialog):
         tab_widget.addTab(self._create_search_tab(), "Searching your Blocks")
         tab_widget.addTab(self._create_document_tab(), "Sending to Doc")
         tab_widget.addTab(self._create_splitter_tab(), "Add Files to Index") 
+        tab_widget.addTab(self._create_update_index_tab(), "Update Index")
         tab_widget.addTab(self._create_shortcuts_tab(), "Keyboard Shortcuts")
         
         # Add close button
@@ -432,6 +433,16 @@ class HelpDialog(QDialog):
             <li>Type in the search box to find documents</li>
             <li>Click on a document to copy its contents</li>
         </ol>
+        
+        <h3>Search Settings:</h3>
+        <p>The <b>Search Settings</b> menu provides several useful options:</p>
+        <ul>
+            <li><b>Select Search Folder:</b> Choose the folder containing your documents</li>
+            <li><b>Show Current Folder:</b> Display information about the current search location</li>
+            <li><b>Reindex:</b> Refresh the document index to pick up new or modified files</li>
+            <li><b>Include Path in Search:</b> Include folder names when searching (Ctrl+Shift+P)</li>
+            <li><b>Prefix Configuration:</b> Set up shortcuts for searching specific folders</li>
+        </ul>
         """
         
         label = QLabel(text)
@@ -589,6 +600,78 @@ class HelpDialog(QDialog):
             <li>Heading 1 will target Pockets, Heading 2 Hats, Heading 3 Blocks, and Heading 4 Tags</li>
             <li>Use the ZIP option for easier management if you need to share the index</li>
             <li>For large documents, processing may take some time - the queue system lets you set up multiple jobs</li>
+        </ul>
+        """
+        
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        
+        layout.addWidget(label)
+        layout.addStretch(1)
+        
+        return widget
+
+    def _create_update_index_tab(self):
+        """Create the update index help tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        text = """
+        <h2>Update Index</h2>
+        
+        <h3>Overview:</h3>
+        <p>The Update Index feature allows you to refresh existing index folders with new content or modifications
+        without having to recreate the entire index from scratch.</p>
+        
+        <h3>How to Access:</h3>
+        <p>Navigate to <b>Index → Update Index</b></p>
+        
+        <h3>Update Tabs:</h3>
+        <p>The Update Index dialog provides two tabs for different workflows:</p>
+        
+        <h4>1. Update All</h4>
+        <ul>
+            <li><b>Purpose:</b> Automatically detect and queue all source documents at once</li>
+            <li><b>When to Use:</b> When you have multiple source documents that need updating</li>
+            <li><b>Process:</b> 
+                <ul>
+                    <li>Select an index folder containing multiple source document subfolders</li>
+                    <li>The system automatically discovers all source documents from metadata files</li>
+                    <li>All documents are queued for processing with their original settings</li>
+                </ul>
+            </li>
+            <li><b>Convenience:</b> No need to manually select each document</li>
+        </ul>
+        
+        <h4>2. Update by Document</h4>
+        <ul>
+            <li><b>Purpose:</b> Manually update individual documents within an index</li>
+            <li><b>When to Use:</b> When you want to update specific documents one at a time</li>
+            <li><b>Process:</b>
+                <ul>
+                    <li>Select a folder containing a single document's index files</li>
+                    <li>Settings are read from the existing metadata file</li>
+                    <li>Process the single document with chosen update mode</li>
+                </ul>
+            </li>
+        </ul>
+        
+        <h3>Update Modes (Available in Both Tabs):</h3>
+        <ul>
+            <li><b>Add New Only:</b> Only add headings that don't already exist (incremental update)</li>
+            <li><b>Rebuild All:</b> Delete and recreate all content ⚠️ <em>This completely overwrites existing content</em></li>
+            <li><b>Remove deleted headings:</b> Clean up headings no longer in source (checked by default)</li>
+        </ul>
+        
+        <h3>Tips:</h3>
+        <ul>
+            <li>Use "Add New Only" mode for incremental changes to save time</li>
+            <li>Use "Rebuild All" mode when you want to ensure complete consistency (overwrites existing content)</li>
+            <li>Use "Update All" tab for batch processing multiple documents</li>
+            <li>Use "Update by Document" tab for focused updates on specific documents</li>
+            <li>The system automatically uses the heading level and hierarchy settings from when the index was created</li>
+            <li>If metadata files are missing, recreate the index using "Add Files to Index"</li>
         </ul>
         """
         

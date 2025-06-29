@@ -26,6 +26,7 @@ A sophisticated Word document search and content transfer utility designed speci
 - Output as individual files or ZIP archive
 - Uses a template system for consistent formatting
 - Queue system for processing multiple documents
+- Update existing indexes without recreating from scratch
 
 ### User Experience
 - Global hotkey activation (default: Ctrl+Space)
@@ -81,6 +82,15 @@ Navigate with Up/Down arrows, select with Enter, and press Right Arrow to return
 3. Choose heading level to split at and output options
 4. Select output location
 5. Add to queue and process documents
+
+### Updating Existing Indexes
+1. Open Index → Update Index...
+2. Choose update mode:
+   - **Update All**: Complete rebuild of entire index folder
+   - **Update by Document**: Update individual documents within an index
+3. Select the index folder to update
+4. For document updates, choose between "Add New Only" or "Rebuild All"
+5. The system automatically uses original settings from metadata files
 
 ## Development
 
