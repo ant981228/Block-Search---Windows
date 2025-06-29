@@ -6720,6 +6720,9 @@ class DocxSearchApp(QMainWindow):
         refresh_docs_action.setShortcut('F5')
         refresh_docs_action.triggered.connect(self.refresh_open_documents)
         
+        # Auto-refresh when menu is opened
+        open_docs_menu.aboutToShow.connect(self.refresh_open_documents)
+        
         open_docs_menu.addSeparator()
         
         # Paste mode selection
