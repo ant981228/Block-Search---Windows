@@ -3331,6 +3331,7 @@ class UpdateIndexDialog(QDialog):
         self.update_mode = "add_new"  # "update_all" or "add_new"
         self.check_removed = False
         self.replacement_template_path = None  # For Update All tab
+        self.shared_files_folder = None  # For resolving source paths across different systems
         
         # Threading components
         self.worker = None
@@ -3515,6 +3516,42 @@ class UpdateIndexDialog(QDialog):
         
         update_all_layout.addWidget(index_folder_group)
         
+        # Shared files folder selection (optional)
+        shared_files_group = QGroupBox("Shared Files Location (Optional)")
+        shared_files_layout = QVBoxLayout(shared_files_group)
+        
+        # Explanation label
+        shared_files_explanation = QLabel(
+            "If source files cannot be found, select the folder containing your team's shared files. "
+            "This helps when team members have different absolute paths to the same shared folder "
+            "(e.g., different Dropbox locations)."
+        )
+        shared_files_explanation.setWordWrap(True)
+        shared_files_explanation.setStyleSheet("QLabel { color: #666; font-size: 11px; padding: 5px; }")
+        shared_files_layout.addWidget(shared_files_explanation)
+        
+        # Shared folder selection
+        shared_folder_layout = QHBoxLayout()
+        shared_folder_label = QLabel("Shared Files Folder:")
+        self.shared_files_field = QLineEdit()
+        self.shared_files_field.setReadOnly(True)
+        self.shared_files_field.setPlaceholderText("Select the folder containing your team's shared files")
+        
+        shared_folder_button = QPushButton("Browse...")
+        shared_folder_button.clicked.connect(self.browse_shared_files_folder)
+        
+        # Clear button
+        clear_shared_folder_button = QPushButton("Clear")
+        clear_shared_folder_button.clicked.connect(self.clear_shared_files_folder)
+        
+        shared_folder_layout.addWidget(shared_folder_label)
+        shared_folder_layout.addWidget(self.shared_files_field, 1)
+        shared_folder_layout.addWidget(shared_folder_button)
+        shared_folder_layout.addWidget(clear_shared_folder_button)
+        
+        shared_files_layout.addLayout(shared_folder_layout)
+        update_all_layout.addWidget(shared_files_group)
+        
         # Template replacement section (initially hidden)
         self.template_replacement_group = QGroupBox("Template Replacement")
         template_replacement_layout = QVBoxLayout(self.template_replacement_group)
@@ -3676,13 +3713,15 @@ class UpdateIndexDialog(QDialog):
                 with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
                 
-                source_path = metadata.get('source_document_path')
-                if source_path:
-                    source_path = Path(source_path)
+                source_path_str = metadata.get('source_document_path')
+                if source_path_str:
                     # Get the subfolder (parent directory of metadata file)
                     subfolder = metadata_file.parent
                     
-                    if source_path.exists():
+                    # Try to resolve the source path
+                    resolved_source_path, resolution_method = self._resolve_source_path(source_path_str)
+                    
+                    if resolution_method != 'not_found':
                         # Check if template exists
                         template_path = metadata.get('template_path')
                         template_exists = template_path and Path(template_path).exists()
@@ -3691,21 +3730,31 @@ class UpdateIndexDialog(QDialog):
                             self.missing_templates.add(template_path)
                         
                         discovered_sources.append({
-                            'source_path': source_path,
+                            'source_path': resolved_source_path,
                             'metadata_file': metadata_file,
                             'subfolder': subfolder,
                             'metadata': metadata,
-                            'template_exists': template_exists
+                            'template_exists': template_exists,
+                            'resolution_method': resolution_method
                         })
                         
                         # Add to list widget with relative path for better visibility
                         relative_path = subfolder.relative_to(index_folder)
                         template_warning = " ⚠️ (missing template)" if not template_exists else ""
-                        item_text = f"{source_path.name} → {relative_path}{template_warning}"
+                        
+                        # Add indicator for how the path was resolved
+                        resolution_indicator = ""
+                        if resolution_method == 'relative':
+                            resolution_indicator = " 🔗 (via shared folder)"
+                        
+                        item_text = f"{resolved_source_path.name} → {relative_path}{template_warning}{resolution_indicator}"
                         self.sources_list.addItem(item_text)
                     else:
                         # Source file doesn't exist - add error item
-                        error_text = f"❌ {source_path.name} (FILE NOT FOUND: {source_path})"
+                        original_path = Path(source_path_str)
+                        error_text = f"❌ {original_path.name} (FILE NOT FOUND)"
+                        if self.shared_files_folder:
+                            error_text += f" (tried absolute and relative to {self.shared_files_folder.name})"
                         error_item = QListWidgetItem(error_text)
                         error_item.setForeground(QColor('red'))
                         self.sources_list.addItem(error_item)
@@ -3790,6 +3839,73 @@ class UpdateIndexDialog(QDialog):
             # Enable add all button if we have discovered sources
             if hasattr(self, 'discovered_sources') and self.discovered_sources:
                 self.add_all_button.setEnabled(True)
+    
+    def browse_shared_files_folder(self):
+        """Open directory dialog to select shared files folder."""
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Shared Files Folder",
+            self.settings.value('last_shared_files_dir', ''),
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if dir_path:
+            self.shared_files_folder = Path(dir_path)
+            self.shared_files_field.setText(str(self.shared_files_folder))
+            self.settings.setValue('last_shared_files_dir', dir_path)
+            
+            # Re-discover source documents with new shared folder
+            if self.index_folder_field.text():
+                self._discover_source_documents(Path(self.index_folder_field.text()))
+    
+    def clear_shared_files_folder(self):
+        """Clear the shared files folder selection."""
+        self.shared_files_folder = None
+        self.shared_files_field.clear()
+        
+        # Re-discover source documents without shared folder
+        if self.index_folder_field.text():
+            self._discover_source_documents(Path(self.index_folder_field.text()))
+    
+    def _resolve_source_path(self, original_path_str):
+        """
+        Resolve source path by trying absolute path first, then relative to shared folder.
+        Returns (resolved_path, resolution_method) where method is 'absolute', 'relative', or 'not_found'.
+        """
+        original_path = Path(original_path_str)
+        
+        # Try absolute path first
+        if original_path.exists():
+            return original_path, 'absolute'
+        
+        # If shared folder is specified, try relative path resolution
+        if self.shared_files_folder:
+            try:
+                # Convert Windows paths to use forward slashes for consistency
+                normalized_original = original_path_str.replace('\\', '/')
+                normalized_shared = str(self.shared_files_folder).replace('\\', '/')
+                
+                # Find the shared folder name in the original path
+                shared_folder_name = self.shared_files_folder.name
+                
+                # Look for the shared folder name in the original path
+                if shared_folder_name in normalized_original:
+                    # Split at the shared folder name and take everything after it
+                    parts = normalized_original.split(shared_folder_name)
+                    if len(parts) > 1:
+                        relative_part = parts[-1].lstrip('/')  # Remove leading slash
+                        
+                        # Construct new path
+                        resolved_path = self.shared_files_folder / relative_part
+                        
+                        if resolved_path.exists():
+                            return resolved_path, 'relative'
+                        
+            except Exception as e:
+                print(f"Error resolving relative path for {original_path_str}: {e}")
+        
+        # Could not resolve
+        return original_path, 'not_found'
     
     def add_all_to_queue(self):
         """Add all discovered source documents to the queue."""
