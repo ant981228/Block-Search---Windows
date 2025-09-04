@@ -6701,8 +6701,23 @@ class DocxSearchApp(QMainWindow):
         """Initialize system tray integration with sophisticated menu handling."""
         self.tray_icon = QSystemTrayIcon(self)
         
-        # Create icon - you'll need to replace with your actual icon path
-        icon = QIcon(r"C:\Mac\Home\Desktop\block_sender_icon.ico")
+        # Try to load icon from multiple sources, fallback to app icon
+        icon = QIcon()
+        
+        # Handle both development and PyInstaller bundled environments
+        if getattr(sys, 'frozen', False):
+            # Running as PyInstaller bundle
+            icon_path = Path(sys._MEIPASS) / "block_sender_icon.ico"
+        else:
+            # Running as script
+            icon_path = Path(__file__).parent / "block_sender_icon.ico"
+        
+        if icon_path.exists():
+            icon = QIcon(str(icon_path))
+        else:
+            # Fallback to application icon or default system icon
+            icon = self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)
+        
         self.tray_icon.setIcon(icon)
         
         # Create tray menu
@@ -6892,7 +6907,8 @@ class DocxSearchApp(QMainWindow):
     
     def on_tray_activated(self, reason):
         """Handle tray icon activation with platform-aware behavior."""
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, 
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
             self.activate_window()
 
     def keyPressEvent(self, event: QKeyEvent):
