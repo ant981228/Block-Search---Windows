@@ -2253,10 +2253,26 @@ class QueueItemWidget(QWidget):
         # Set fixed height
         self.setFixedHeight(100)
         
-        # Add border
-        self.setStyleSheet(
-            "QWidget { border: 1px solid #cccccc; border-radius: 4px; background-color: #f9f9f9; }"
-        )
+        # Add border with theme-aware styling
+        self.update_theme_style()
+    
+    def update_theme_style(self):
+        """Update widget style based on current theme."""
+        # Check if parent has access to app settings for theme
+        app = QApplication.instance()
+        if app and hasattr(app, 'property'):
+            # Try to get dark mode from application property or default settings
+            settings = QSettings('DocxSearchApp', 'Settings')
+            dark_mode = settings.value('dark_mode', False, type=bool)
+        else:
+            dark_mode = False
+        
+        if dark_mode:
+            style = "QWidget { border: 1px solid #666666; border-radius: 4px; background-color: #404040; color: #ffffff; }"
+        else:
+            style = "QWidget { border: 1px solid #cccccc; border-radius: 4px; background-color: #f9f9f9; }"
+        
+        self.setStyleSheet(style)
     
     def update_status(self):
         """Update status display based on queue item state."""
@@ -6968,6 +6984,9 @@ class DocxSearchApp(QMainWindow):
         self.setup_ui()
         self.setup_menu()
         
+        # Apply saved theme
+        self.apply_theme()
+        
         # Initial document indexing
         self.index_documents()
         self._update_target_status()
@@ -7446,6 +7465,13 @@ class DocxSearchApp(QMainWindow):
         self.include_path_action.setShortcut('Ctrl+Shift+P')  # Add keyboard shortcut
         self.include_path_action.triggered.connect(self.toggle_include_path)
         
+        # Add dark mode toggle
+        self.dark_mode_action = settings_menu.addAction('Dark Mode')
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(self.settings.value('dark_mode', False, type=bool))
+        self.dark_mode_action.setShortcut('Ctrl+Shift+M')  # Add keyboard shortcut
+        self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
+        
         configure_shortcut_action = settings_menu.addAction('Set Window Focus Shortcut...')
         configure_shortcut_action.triggered.connect(self.configure_shortcut)
         
@@ -7628,6 +7654,113 @@ class DocxSearchApp(QMainWindow):
         # Re-run search with new setting if search box has content
         if self.search_input.text():
             self.perform_search()
+    
+    def toggle_dark_mode(self):
+        """Toggle between dark and light mode."""
+        dark_mode = self.dark_mode_action.isChecked()
+        self.settings.setValue('dark_mode', dark_mode)
+        
+        # Show status message
+        mode = "Dark" if dark_mode else "Light"
+        self.statusBar().showMessage(f"{mode} mode enabled (Ctrl+Shift+M)", 3000)
+        
+        # Apply the theme change
+        self.apply_theme()
+    
+    def apply_theme(self):
+        """Apply the selected theme (dark or light mode) to the application."""
+        dark_mode = self.settings.value('dark_mode', False, type=bool)
+        
+        if dark_mode:
+            self.apply_dark_theme()
+        else:
+            self.apply_light_theme()
+    
+    def apply_dark_theme(self):
+        """Apply dark theme styling to the application."""
+        # Create dark palette
+        dark_palette = QPalette()
+        
+        # Window colors
+        dark_palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+        dark_palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
+        
+        # Base colors (for input fields)
+        dark_palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
+        dark_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+        
+        # Text colors
+        dark_palette.setColor(QPalette.ColorRole.Text, QColor(255, 255, 255))
+        dark_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+        
+        # Button colors
+        dark_palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+        dark_palette.setColor(QPalette.ColorRole.ButtonText, QColor(255, 255, 255))
+        
+        # Highlight colors
+        dark_palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+        dark_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
+        
+        # Apply the palette
+        QApplication.instance().setPalette(dark_palette)
+        
+        # Update component-specific styles
+        self.update_component_styles(dark=True)
+    
+    def apply_light_theme(self):
+        """Apply light theme styling to the application."""
+        # Reset to default light palette
+        light_palette = QPalette()
+        QApplication.instance().setPalette(light_palette)
+        
+        # Update component-specific styles
+        self.update_component_styles(dark=False)
+    
+    def update_component_styles(self, dark=False):
+        """Update styles for specific components based on theme."""
+        if dark:
+            # Dark theme styles
+            queue_style = "QWidget { border: 1px solid #666666; border-radius: 4px; background-color: #404040; color: #ffffff; }"
+            context_title_style = "font-weight: bold; color: #5dade2;"
+            target_status_style = """
+                QLineEdit {
+                    background-color: #2c3e50;
+                    color: #ffffff;
+                    padding: 2px 5px;
+                    border: 1px solid #34495e;
+                }
+            """
+            warning_style = "QLabel { color: #e74c3c; font-weight: bold; padding: 10px; }"
+        else:
+            # Light theme styles (original)
+            queue_style = "QWidget { border: 1px solid #cccccc; border-radius: 4px; background-color: #f9f9f9; }"
+            context_title_style = "font-weight: bold; color: #2c5aa0;"
+            target_status_style = """
+                QLineEdit {
+                    background-color: #e6f3ff;
+                    color: #000000;
+                    padding: 2px 5px;
+                    border: 1px solid #b8d6f3;
+                }
+            """
+            warning_style = "QLabel { color: #ff6b6b; font-weight: bold; padding: 10px; }"
+        
+        # Apply styles to existing components if they exist
+        if hasattr(self, 'context_title') and self.context_title:
+            self.context_title.setStyleSheet(context_title_style)
+        
+        if hasattr(self, 'target_status') and self.target_status:
+            self.target_status.setStyleSheet(target_status_style)
+        
+        # Update any existing queue item widgets
+        self.update_queue_item_styles()
+    
+    def update_queue_item_styles(self):
+        """Update styles for all existing queue item widgets."""
+        # Find and update any QueueItemWidget instances
+        for widget in self.findChildren(QueueItemWidget):
+            if hasattr(widget, 'update_theme_style'):
+                widget.update_theme_style()
 
     def on_item_activated(self, item: QListWidgetItem):
         """Handle document selection using current default paste mode."""
