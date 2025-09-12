@@ -703,16 +703,16 @@ class HelpDialog(QDialog):
                 <td>Hide application window</td>
             </tr>
             <tr>
-                <td><b>F5</b></td>
-                <td>Refresh open documents list</td>
-            </tr>
-            <tr>
                 <td><b>Ctrl+T</b></td>
                 <td>Select (closed) target document</td>
             </tr>
             <tr>
                 <td><b>Ctrl+Shift+T</b></td>
                 <td>Clear (closed) target document</td>
+            </tr>
+            <tr>
+                <td><b>Ctrl+Shift+D</b></td>
+                <td>Show all open documents dialog</td>
             </tr>
             <tr>
                 <td><b>Ctrl+P</b></td>
@@ -5848,6 +5848,250 @@ class EnhancedResultsList(QListWidget):
         # Handle all other keys normally
         super().keyPressEvent(event)
 
+class CachedDocumentList:
+    """
+    Manages a cached list of open Word documents with time-based expiration.
+    
+    This class improves performance by avoiding repeated COM calls to enumerate
+    documents, which can be slow when many documents are open.
+    """
+    
+    def __init__(self, cache_duration: float = 5.0):
+        """
+        Initialize the cached document list.
+        
+        Args:
+            cache_duration: How long to keep the cache before refreshing (seconds)
+        """
+        self.cache: List[ActiveDocument] = []
+        self.last_update: float = 0
+        self.cache_duration = cache_duration
+        self._lock = QObject()  # For thread safety
+        
+    def get_documents(self, word_handler: 'WordHandler', force_refresh: bool = False) -> List[ActiveDocument]:
+        """
+        Get the list of active documents, using cache if valid.
+        
+        Args:
+            word_handler: WordHandler instance to fetch documents
+            force_refresh: Force a refresh even if cache is valid
+            
+        Returns:
+            List of ActiveDocument objects
+        """
+        import time
+        now = time.time()
+        
+        if force_refresh or (now - self.last_update > self.cache_duration):
+            # Use fast version for better performance with many documents
+            self.cache = word_handler.get_active_documents_fast()
+            self.last_update = now
+            
+        return self.cache.copy()  # Return a copy to prevent external modification
+    
+    def invalidate(self):
+        """Invalidate the cache, forcing refresh on next access."""
+        self.last_update = 0
+
+class DocumentSelectorDialog(QDialog):
+    """
+    A searchable dialog for selecting from many open Word documents.
+    
+    This dialog provides:
+    - Fast, filterable list of open documents
+    - Keyboard navigation
+    - Asynchronous loading to prevent UI freezing
+    - Document metadata display
+    """
+    
+    documentSelected = pyqtSignal(ActiveDocument)
+    
+    def __init__(self, word_handler: 'WordHandler', cached_list: CachedDocumentList, parent=None):
+        """
+        Initialize the document selector dialog.
+        
+        Args:
+            word_handler: WordHandler instance for document operations
+            cached_list: Cached document list for performance
+            parent: Parent widget
+        """
+        super().__init__(parent)
+        self.word_handler = word_handler
+        self.cached_list = cached_list
+        self.selected_doc = None
+        self.documents = []
+        self.filtered_documents = []
+        
+        self.setWindowTitle("Select Target Document")
+        self.setModal(True)
+        self.setup_ui()
+        
+        # Start loading documents after UI is ready
+        QTimer.singleShot(0, self.load_documents)
+        
+    def setup_ui(self):
+        """Set up the dialog user interface."""
+        self.setMinimumSize(600, 500)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        # Header with instructions
+        header = QLabel("Select a target document or search by name:")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+        
+        # Search box
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Type to filter documents...")
+        self.search_box.textChanged.connect(self.filter_documents)
+        self.search_box.installEventFilter(self)  # For keyboard navigation
+        layout.addWidget(self.search_box)
+        
+        # Document list
+        self.doc_list = QListWidget()
+        self.doc_list.setAlternatingRowColors(True)
+        self.doc_list.itemActivated.connect(self.on_item_activated)
+        self.doc_list.currentItemChanged.connect(self.on_selection_changed)
+        layout.addWidget(self.doc_list)
+        
+        # Info panel
+        info_frame = QFrame()
+        info_frame.setFrameStyle(QFrame.Shape.Box)
+        info_layout = QVBoxLayout(info_frame)
+        
+        self.info_label = QLabel("No document selected")
+        self.info_label.setWordWrap(True)
+        self.info_label.setMaximumHeight(60)
+        info_layout.addWidget(self.info_label)
+        
+        layout.addWidget(info_frame)
+        
+        # Status label
+        self.status_label = QLabel("Loading documents...")
+        layout.addWidget(self.status_label)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | 
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        self.ok_button = button_box.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok_button.setEnabled(False)
+        
+        layout.addWidget(button_box)
+        
+        # Set focus to search box
+        self.search_box.setFocus()
+        
+    def eventFilter(self, obj, event):
+        """Handle keyboard navigation from search box."""
+        if obj == self.search_box and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                # Transfer focus to list on up/down arrow
+                if self.doc_list.count() > 0:
+                    self.doc_list.setFocus()
+                    if event.key() == Qt.Key.Key_Down:
+                        self.doc_list.setCurrentRow(0)
+                    else:
+                        self.doc_list.setCurrentRow(self.doc_list.count() - 1)
+                return True
+                
+        return super().eventFilter(obj, event)
+        
+    def load_documents(self):
+        """Load documents asynchronously to prevent UI freezing."""
+        self.status_label.setText("Loading documents...")
+        self.doc_list.clear()
+        
+        # Use cached list for better performance
+        try:
+            self.documents = self.cached_list.get_documents(self.word_handler)
+            
+            if not self.documents:
+                self.status_label.setText("No Word documents are currently open")
+                return
+                
+            # Populate list
+            for doc in self.documents:
+                item = QListWidgetItem(doc.name)
+                item.setData(Qt.ItemDataRole.UserRole, doc)
+                
+                # Add path as tooltip if available
+                if doc.path and doc.path != doc.name:
+                    item.setToolTip(doc.path)
+                    
+                self.doc_list.addItem(item)
+                
+            self.filtered_documents = self.documents.copy()
+            self.status_label.setText(f"Found {len(self.documents)} open document(s)")
+            
+            # Select first item
+            if self.doc_list.count() > 0:
+                self.doc_list.setCurrentRow(0)
+                
+        except Exception as e:
+            self.status_label.setText(f"Error loading documents: {str(e)}")
+            
+    def filter_documents(self, text: str):
+        """Filter the document list based on search text."""
+        search_text = text.lower().strip()
+        
+        self.doc_list.clear()
+        self.filtered_documents.clear()
+        
+        for doc in self.documents:
+            if not search_text or search_text in doc.name.lower():
+                item = QListWidgetItem(doc.name)
+                item.setData(Qt.ItemDataRole.UserRole, doc)
+                
+                if doc.path and doc.path != doc.name:
+                    item.setToolTip(doc.path)
+                    
+                self.doc_list.addItem(item)
+                self.filtered_documents.append(doc)
+                
+        # Update status
+        if search_text:
+            self.status_label.setText(f"Showing {len(self.filtered_documents)} of {len(self.documents)} documents")
+        else:
+            self.status_label.setText(f"Found {len(self.documents)} open document(s)")
+            
+        # Select first item if any
+        if self.doc_list.count() > 0:
+            self.doc_list.setCurrentRow(0)
+            
+    def on_selection_changed(self, current, previous):
+        """Handle selection change in the document list."""
+        if current:
+            doc = current.data(Qt.ItemDataRole.UserRole)
+            if doc:
+                self.selected_doc = doc
+                self.ok_button.setEnabled(True)
+                
+                # Update info panel
+                info_text = f"<b>{doc.name}</b>"
+                if doc.path and doc.path != doc.name:
+                    info_text += f"<br><small>{doc.path}</small>"
+                self.info_label.setText(info_text)
+        else:
+            self.selected_doc = None
+            self.ok_button.setEnabled(False)
+            self.info_label.setText("No document selected")
+            
+    def on_item_activated(self, item):
+        """Handle double-click or Enter on an item."""
+        if item:
+            self.selected_doc = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
+            
+    def get_selected_document(self) -> Optional[ActiveDocument]:
+        """Get the selected document after dialog is accepted."""
+        return self.selected_doc
+
 class WordHandler:
     """
     Manages Word automation with sophisticated state management and error handling.
@@ -6003,6 +6247,56 @@ class WordHandler:
             except:
                 pass
         
+        return active_docs
+    
+    def get_active_documents_fast(self) -> List[ActiveDocument]:
+        """
+        Fast version of get_active_documents with minimal COM property access.
+        
+        This version only accesses the document name initially, which significantly
+        improves performance when many documents are open. Other properties can be
+        loaded on demand if needed.
+        """
+        active_docs = []
+        try:
+            with self.word_session() as word_app:
+                # Quick check for document count
+                doc_count = word_app.Documents.Count
+                if not doc_count:
+                    return []
+                
+                # Pre-allocate list for better performance
+                active_docs = [None] * doc_count
+                
+                # Single pass with minimal property access
+                for i in range(doc_count):
+                    try:
+                        doc = word_app.Documents.Item(i + 1)  # 1-indexed
+                        name = doc.Name  # Only access name property
+                        
+                        # Create lightweight document object
+                        active_docs[i] = ActiveDocument(
+                            name=name,
+                            path="",  # Load on demand
+                            window_index=i + 1,
+                            doc_id=f"doc_{i+1}_{name}"  # Simple ID
+                        )
+                    except Exception:
+                        # Fill with None if error, will be filtered out
+                        active_docs[i] = None
+                        
+                # Filter out any None entries
+                active_docs = [doc for doc in active_docs if doc is not None]
+                
+                # Restore screen updating
+                try:
+                    word_app.ScreenUpdating = True
+                except:
+                    pass
+                    
+        except Exception as e:
+            print(f"Error in fast document enumeration: {str(e)}")
+            
         return active_docs
 
     def copy_to_clipboard(self, file_path: str) -> bool:
@@ -6667,6 +6961,9 @@ class DocxSearchApp(QMainWindow):
         self.searcher = DocumentSearcher(self.search_folder, self.prefix_manager)
         self.search_delay = 300  # ms for debouncing
         
+        # Initialize cached document list for performance
+        self.cached_doc_list = CachedDocumentList(cache_duration=5.0)
+        
         # Setup UI components
         self.setup_ui()
         self.setup_menu()
@@ -7199,9 +7496,11 @@ class DocxSearchApp(QMainWindow):
         
         # Open Documents menu with paste mode options
         open_docs_menu = menubar.addMenu('Send to Open Doc')
-        refresh_docs_action = open_docs_menu.addAction('Refresh Open Documents')
-        refresh_docs_action.setShortcut('F5')
-        refresh_docs_action.triggered.connect(self.refresh_open_documents)
+        
+        # Open dialog action replaces refresh since menu auto-refreshes
+        open_dialog_action = open_docs_menu.addAction('Open Dialog...')
+        # Shortcut already defined as global action
+        open_dialog_action.triggered.connect(self.show_document_selector)
         
         # Auto-refresh when menu is opened
         open_docs_menu.aboutToShow.connect(self.refresh_open_documents)
@@ -7237,6 +7536,12 @@ class DocxSearchApp(QMainWindow):
         self.toggle_paste_mode_action.setShortcut('Ctrl+P')
         self.toggle_paste_mode_action.triggered.connect(self.toggle_paste_mode)
         self.addAction(self.toggle_paste_mode_action)  # Add to application actions
+        
+        # Add document selector shortcut action
+        self.show_all_docs_action = QAction('Show All Documents', self)
+        self.show_all_docs_action.setShortcut('Ctrl+Shift+D')
+        self.show_all_docs_action.triggered.connect(self.show_document_selector)
+        self.addAction(self.show_all_docs_action)  # Add to application actions
         
         # Add the toggle action to the menu
         self.paste_mode_menu.addSeparator()
@@ -7579,22 +7884,46 @@ class DocxSearchApp(QMainWindow):
     def refresh_open_documents(self):
         """Update the list of open documents in the menu."""
         # Clear existing document actions
-        for action in self.open_docs_menu.actions()[2:]:  # Skip refresh and separator
+        for action in self.open_docs_menu.actions()[2:]:  # Skip "Open Dialog..." and separator
             self.open_docs_menu.removeAction(action)
         
-        # Get current open documents
-        active_docs = self.searcher.word_handler.get_active_documents()
+        # Get current open documents using cached list for better performance
+        active_docs = self.cached_doc_list.get_documents(self.searcher.word_handler)
         
         if not active_docs:
             no_docs_action = self.open_docs_menu.addAction('No Open Documents')
             no_docs_action.setEnabled(False)
             return
         
-        # Add action for each open document
-        for doc in active_docs:
+        # Limit menu to recent documents for performance
+        MAX_MENU_DOCS = 15
+        
+        # Show limited number of documents in menu
+        docs_to_show = active_docs[:MAX_MENU_DOCS]
+        
+        for doc in docs_to_show:
             action = self.open_docs_menu.addAction(doc.name)
             action.setData(doc.doc_id)
             action.triggered.connect(lambda checked, d=doc: self.set_active_target(d))
+        
+        # Add "Show All..." option if there are more documents
+        if len(active_docs) > MAX_MENU_DOCS:
+            self.open_docs_menu.addSeparator()
+            show_all_action = self.open_docs_menu.addAction(f'Show All {len(active_docs)} Documents...')
+            show_all_action.setShortcut('Ctrl+Shift+D')
+            show_all_action.triggered.connect(self.show_document_selector)
+    
+    def show_document_selector(self):
+        """Show the document selector dialog for selecting from many open documents."""
+        dialog = DocumentSelectorDialog(self.searcher.word_handler, self.cached_doc_list, self)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_doc = dialog.get_selected_document()
+            if selected_doc:
+                self.set_active_target(selected_doc)
+                
+        # Invalidate cache after dialog closes to ensure fresh data next time
+        self.cached_doc_list.invalidate()
     
     def set_active_target(self, doc: ActiveDocument):
         """Set an open document as the paste target."""
