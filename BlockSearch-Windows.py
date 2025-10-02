@@ -12,7 +12,6 @@ import os
 import re
 import sys
 import zipfile
-import concurrent.futures
 from ctypes import wintypes
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -28,9 +27,6 @@ from typing import Dict, List, Optional, Set, Any, Tuple
 import keyboard
 import pythoncom
 import win32com.client
-import win32clipboard
-import pickle
-import struct
 
 # PyQt imports
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -6347,22 +6343,8 @@ class WordHandler:
         return active_docs
 
     def copy_to_clipboard(self, file_path: str) -> bool:
-        """Copy document content to clipboard."""
+        """Copy document content to clipboard using traditional method."""
         try:
-            # Check for cached clipboard data first
-            clipboard_path = file_path + ".clipboard"
-            
-            if os.path.exists(clipboard_path):
-                # Try to load and restore cached clipboard data
-                clipboard_data = self.load_clipboard_from_file(clipboard_path)
-                if clipboard_data:
-                    if self.restore_clipboard_formats(clipboard_data):
-                        print(f"Using cached clipboard data for {os.path.basename(file_path)}")
-                        return True
-                    else:
-                        print(f"Failed to restore clipboard from cache, falling back to Word")
-            
-            # Fall back to traditional method
             with self.word_session() as word_app:
                 with self.open_document(word_app, file_path) as doc:
                     doc.Content.Copy()
@@ -6383,25 +6365,7 @@ class WordHandler:
             bool: True if transfer succeeded, False otherwise
         """
         try:
-            # Check for cached clipboard data first
-            clipboard_path = source_path + ".clipboard"
-            use_fast_index = False
-            
-            if os.path.exists(clipboard_path):
-                # Try to load cached clipboard data
-                clipboard_data = self.load_clipboard_from_file(clipboard_path)
-                if clipboard_data:
-                    if self.restore_clipboard_formats(clipboard_data):
-                        use_fast_index = True
-                        print(f"Using cached clipboard data for {os.path.basename(source_path)}")
-                    else:
-                        print(f"Failed to restore clipboard from cache, falling back to Word")
-            
             with self.word_session() as word_app:
-                # If no fast index, copy content from source
-                if not use_fast_index:
-                    with self.open_document(word_app, source_path) as source_doc:
-                        source_doc.Content.Copy()
                 
                 # Paste to target with formatting
                 with self.open_document(word_app, target_path, readonly=False) as target_doc:
@@ -6414,21 +6378,22 @@ class WordHandler:
                     selection.InsertParagraphBefore()
                     selection.Collapse(0)  # Collapse to end
                     
-                    # Paste with style preservation - try default paste first
+                    # Use InsertFile for perfect formatting preservation
                     try:
-                        # First try: Default paste (Word chooses best format automatically)
+                        print(f"Inserting file content from {os.path.basename(source_path)} using InsertFile")
+                        selection.InsertFile(
+                            FileName=str(source_path),
+                            Range="",  # Insert entire document
+                            ConfirmConversions=False,
+                            Link=False,
+                            Attachment=False
+                        )
+                    except Exception as e:
+                        print(f"InsertFile failed: {e}, falling back to clipboard method")
+                        # Fallback to clipboard method if InsertFile fails
+                        with self.open_document(word_app, source_path) as source_doc:
+                            source_doc.Content.Copy()
                         selection.Paste()
-                    except:
-                        try:
-                            # Second try: Keep Source Formatting
-                            selection.PasteAndFormat(16)  # wdFormatOriginalFormatting
-                        except:
-                            try:
-                                # Third try: Use Destination Styles Recovery
-                                selection.PasteAndFormat(20)  # wdUseDestinationStylesRecovery
-                            except:
-                                # Final fallback: PasteSpecial with RTF format
-                                selection.PasteSpecial(DataType=1)  # wdPasteRTF
                 
                 return True
         
@@ -6449,26 +6414,7 @@ class WordHandler:
             bool: True if paste operation succeeded
         """
         try:
-            # Check for cached clipboard data first
-            clipboard_path = source_path + ".clipboard"
-            use_fast_index = False
-            
-            if os.path.exists(clipboard_path):
-                # Try to load cached clipboard data
-                clipboard_data = self.load_clipboard_from_file(clipboard_path)
-                if clipboard_data:
-                    # Restore clipboard with cached data
-                    if self.restore_clipboard_formats(clipboard_data):
-                        use_fast_index = True
-                        print(f"Using cached clipboard data for {os.path.basename(source_path)}")
-                    else:
-                        print(f"Failed to restore clipboard from cache, falling back to Word")
-                
             with self.word_session() as word_app:
-                # If no fast index, copy source content the traditional way
-                if not use_fast_index:
-                    with self.open_document(word_app, source_path) as source_doc:
-                        source_doc.Content.Copy()
                 
                 # Find target document
                 target_doc = None
@@ -6512,34 +6458,35 @@ class WordHandler:
                     except Exception:
                         start_point = None
                     
-                    # Paste with style preservation - try default paste first
+                    # Use InsertFile for perfect formatting preservation
                     try:
-                        # First try: Default paste (Word chooses best format automatically)
+                        print(f"Inserting file content from {os.path.basename(source_path)} using InsertFile")
+                        word_app.Selection.InsertFile(
+                            FileName=str(source_path),
+                            Range="",  # Insert entire document
+                            ConfirmConversions=False,
+                            Link=False,
+                            Attachment=False
+                        )
+                    except Exception as e:
+                        print(f"InsertFile failed: {e}, falling back to clipboard method")
+                        # Fallback to clipboard method if InsertFile fails
+                        with self.open_document(word_app, source_path) as source_doc:
+                            source_doc.Content.Copy()
                         word_app.Selection.Paste()
-                    except:
-                        try:
-                            # Second try: Keep Source Formatting
-                            word_app.Selection.PasteAndFormat(16)  # wdFormatOriginalFormatting
-                        except:
-                            try:
-                                # Third try: Use Destination Styles Recovery
-                                word_app.Selection.PasteAndFormat(20)  # wdUseDestinationStylesRecovery
-                            except:
-                                # Final fallback: PasteSpecial with RTF format
-                                word_app.Selection.PasteSpecial(DataType=1)  # wdPasteRTF
                     
-                    # Important: Move cursor to end of pasted content
+                    # Important: Move cursor to end of inserted content
                     try:
                         if start_point is not None:
-                            # Find the end of what we just pasted
+                            # Find the end of what we just inserted
                             current_selection = word_app.Selection
-                            # Select from start of our paste to current position
-                            pasted_range = target_doc.Range(start_point, current_selection.End)
-                            # Move to the end of what we pasted
-                            pasted_range.Collapse(0)  # 0 = Collapse to end
-                            pasted_range.Select()
+                            # Select from start of our insert to current position
+                            inserted_range = target_doc.Range(start_point, current_selection.End)
+                            # Move to the end of what we inserted
+                            inserted_range.Collapse(0)  # 0 = Collapse to end
+                            inserted_range.Select()
                     except Exception as e:
-                        print(f"Warning: Could not position cursor after paste: {e}")
+                        print(f"Warning: Could not position cursor after insert: {e}")
                     
                     return True
                     
@@ -6554,175 +6501,6 @@ class WordHandler:
         except Exception as e:
             print(f"Error pasting to active document: {str(e)}")
             return False
-    
-    def capture_clipboard_formats(self) -> Dict[int, bytes]:
-        """
-        Capture all clipboard formats after copying from Word.
-        Returns a dictionary of format ID to binary data.
-        """
-        clipboard_data = {}
-        
-        try:
-            win32clipboard.OpenClipboard()
-            
-            # Get list of available formats
-            format_id = 0
-            available_formats = []
-            
-            while True:
-                format_id = win32clipboard.EnumClipboardFormats(format_id)
-                if format_id == 0:
-                    break
-                available_formats.append(format_id)
-            
-            print(f"Available clipboard formats: {available_formats}")
-            
-            # Handle-based formats that we should skip (they become invalid when app closes)
-            HANDLE_BASED_FORMATS = {
-                3,   # CF_METAFILEPICT
-                8,   # CF_ENHMETAFILE  
-                14,  # CF_ENHMETAFILE (alternative ID)
-                17,  # CF_PRIVATEFIRST (start of private range)
-                2,   # CF_BITMAP
-                9,   # CF_PALETTE
-            }
-            
-            # Capture data for each format
-            for format_id in available_formats:
-                # Skip handle-based formats that become invalid
-                if format_id in HANDLE_BASED_FORMATS:
-                    print(f"Skipping handle-based format {format_id}")
-                    continue
-                    
-                try:
-                    data = win32clipboard.GetClipboardData(format_id)
-                    if isinstance(data, str):
-                        data = data.encode('utf-8', errors='ignore')
-                        clipboard_data[format_id] = data
-                        print(f"Captured text format {format_id}, size: {len(data)} bytes")
-                    elif isinstance(data, bytes):
-                        clipboard_data[format_id] = data
-                        print(f"Captured binary format {format_id}, size: {len(data)} bytes")
-                    else:
-                        print(f"Skipped format {format_id} (unsupported type: {type(data)})")
-                        continue  # Skip non-binary formats we can't handle
-                    
-                except Exception as e:
-                    print(f"Could not capture format {format_id}: {e}")
-                    continue
-                    
-        finally:
-            win32clipboard.CloseClipboard()
-            
-        return clipboard_data
-    
-    def restore_clipboard_formats(self, clipboard_data: Dict[int, bytes]) -> bool:
-        """
-        Restore clipboard formats from saved data.
-        """
-        try:
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            
-            print(f"Restoring {len(clipboard_data)} clipboard formats: {list(clipboard_data.keys())}")
-            
-            # Handle-based formats that we should skip during restore
-            HANDLE_BASED_FORMATS = {
-                3,   # CF_METAFILEPICT
-                8,   # CF_ENHMETAFILE  
-                14,  # CF_ENHMETAFILE (alternative ID)
-                17,  # CF_PRIVATEFIRST (start of private range)
-                2,   # CF_BITMAP
-                9,   # CF_PALETTE
-            }
-            
-            restored_count = 0
-            for format_id, data in clipboard_data.items():
-                # Skip handle-based formats that we shouldn't try to restore
-                if format_id in HANDLE_BASED_FORMATS:
-                    print(f"Skipping handle-based format {format_id} during restore")
-                    continue
-                    
-                try:
-                    if format_id == win32clipboard.CF_TEXT:
-                        # Handle text format
-                        if isinstance(data, bytes):
-                            data = data.decode('utf-8', errors='ignore')
-                        win32clipboard.SetClipboardData(format_id, data)
-                        print(f"Restored text format {format_id}")
-                    elif format_id == win32clipboard.CF_UNICODETEXT:
-                        # Handle unicode text
-                        if isinstance(data, bytes):
-                            data = data.decode('utf-8', errors='ignore')
-                        win32clipboard.SetClipboardData(format_id, data)
-                        print(f"Restored unicode text format {format_id}")
-                    else:
-                        # Handle other binary formats
-                        win32clipboard.SetClipboardData(format_id, data)
-                        print(f"Restored binary format {format_id}, size: {len(data)} bytes")
-                    restored_count += 1
-                except Exception as e:
-                    print(f"Failed to restore format {format_id}: {e}")
-                    continue
-                    
-            print(f"Successfully restored {restored_count} of {len(clipboard_data)} formats")
-            return True
-            
-        except Exception as e:
-            print(f"Error restoring clipboard: {e}")
-            return False
-        finally:
-            win32clipboard.CloseClipboard()
-    
-    def save_clipboard_to_file(self, clipboard_data: Dict[int, bytes], file_path: str):
-        """Save clipboard data to a file."""
-        try:
-            with open(file_path, 'wb') as f:
-                pickle.dump(clipboard_data, f)
-            return True
-        except Exception as e:
-            print(f"Error saving clipboard data: {e}")
-            return False
-    
-    def load_clipboard_from_file(self, file_path: str) -> Optional[Dict[int, bytes]]:
-        """Load clipboard data from a file, handling both old and new formats."""
-        try:
-            with open(file_path, 'rb') as f:
-                data = pickle.load(f)
-                
-            # Check if it's the enhanced format
-            if isinstance(data, dict) and 'version' in data and data['version'] == 2:
-                # New format - return just the clipboard data for now
-                # The style info will be used in paste methods
-                return data['clipboard_data']
-            else:
-                # Old format - direct clipboard data
-                return data
-                
-        except Exception as e:
-            print(f"Error loading clipboard data: {e}")
-            return None
-    
-    def load_enhanced_clipboard_from_file(self, file_path: str) -> Optional[Dict]:
-        """Load enhanced clipboard data including style information."""
-        try:
-            with open(file_path, 'rb') as f:
-                data = pickle.load(f)
-                
-            # Return full enhanced data if available
-            if isinstance(data, dict) and 'version' in data and data['version'] == 2:
-                return data
-            else:
-                # Old format - wrap in enhanced structure
-                return {
-                    'clipboard_data': data,
-                    'word_xml': None,
-                    'version': 1
-                }
-                
-        except Exception as e:
-            print(f"Error loading enhanced clipboard data: {e}")
-            return None
 
 class DocumentSearcher:
     def __init__(self, folder_path: str, prefix_manager: PrefixManager):
@@ -7183,283 +6961,6 @@ class DocumentSearcher:
             reverse=reverse
         )
 
-class FastIndexDialog(QDialog):
-    """
-    Dialog for creating a fast index by pre-capturing clipboard data
-    from all documents in the existing index.
-    """
-    
-    def __init__(self, searcher: DocumentSearcher, parent=None):
-        super().__init__(parent)
-        self.searcher = searcher
-        self.word_handler = WordHandler()
-        self.is_processing = False
-        self.cancel_requested = False
-        
-        self.setWindowTitle("Create Fast Index")
-        self.setMinimumSize(600, 400)
-        self.setup_ui()
-        
-    def setup_ui(self):
-        """Set up the user interface."""
-        layout = QVBoxLayout(self)
-        
-        # Description
-        desc_label = QLabel(
-            "Fast Index creates clipboard cache files for documents in the index.\n"
-            "This allows instant document retrieval without opening Word.\n\n"
-            "Select folders to process:"
-        )
-        desc_label.setWordWrap(True)
-        layout.addWidget(desc_label)
-        
-        # Folder selection
-        self.folder_list = QListWidget()
-        self.folder_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        
-        # Populate with indexed folders
-        indexed_folders = set()
-        for doc_info in self.searcher.document_index.values():
-            folder = str(doc_info.path.parent)
-            indexed_folders.add(folder)
-        
-        for folder in sorted(indexed_folders):
-            self.folder_list.addItem(folder)
-        
-        # Select all by default
-        self.folder_list.selectAll()
-        
-        layout.addWidget(self.folder_list)
-        
-        # Progress section
-        progress_group = QGroupBox("Progress")
-        progress_layout = QVBoxLayout(progress_group)
-        
-        self.status_label = QLabel("Ready to process")
-        progress_layout.addWidget(self.status_label)
-        
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        progress_layout.addWidget(self.progress_bar)
-        
-        self.details_text = QTextEdit()
-        self.details_text.setReadOnly(True)
-        self.details_text.setMaximumHeight(100)
-        progress_layout.addWidget(self.details_text)
-        
-        layout.addWidget(progress_group)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        
-        self.select_all_btn = QPushButton("Select All")
-        self.select_all_btn.clicked.connect(self.folder_list.selectAll)
-        button_layout.addWidget(self.select_all_btn)
-        
-        self.clear_all_btn = QPushButton("Clear All")
-        self.clear_all_btn.clicked.connect(self.folder_list.clearSelection)
-        button_layout.addWidget(self.clear_all_btn)
-        
-        button_layout.addStretch()
-        
-        self.process_btn = QPushButton("Create Fast Index")
-        self.process_btn.clicked.connect(self.start_processing)
-        button_layout.addWidget(self.process_btn)
-        
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.clicked.connect(self.cancel_processing)
-        self.cancel_btn.setEnabled(False)
-        button_layout.addWidget(self.cancel_btn)
-        
-        self.close_btn = QPushButton("Close")
-        self.close_btn.clicked.connect(self.accept)
-        button_layout.addWidget(self.close_btn)
-        
-        layout.addLayout(button_layout)
-        
-    def start_processing(self):
-        """Start the fast index creation process."""
-        selected_folders = [
-            item.text() for item in self.folder_list.selectedItems()
-        ]
-        
-        if not selected_folders:
-            QMessageBox.warning(self, "No Selection", "Please select at least one folder to process.")
-            return
-        
-        # Get documents in selected folders
-        documents_to_process = []
-        for doc_info in self.searcher.document_index.values():
-            if str(doc_info.path.parent) in selected_folders:
-                documents_to_process.append(doc_info)
-        
-        if not documents_to_process:
-            QMessageBox.information(self, "No Documents", "No documents found in selected folders.")
-            return
-        
-        # Update UI state
-        self.is_processing = True
-        self.cancel_requested = False
-        self.process_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.folder_list.setEnabled(False)
-        self.select_all_btn.setEnabled(False)
-        self.clear_all_btn.setEnabled(False)
-        
-        # Start processing in thread
-        self.worker_thread = QThread()
-        self.worker = FastIndexWorker(documents_to_process, self.word_handler)
-        self.worker.moveToThread(self.worker_thread)
-        
-        # Connect signals
-        self.worker.progress.connect(self.update_progress)
-        self.worker.status.connect(self.update_status)
-        self.worker.finished.connect(self.processing_finished)
-        self.worker.error.connect(self.handle_error)
-        
-        self.worker_thread.started.connect(self.worker.process)
-        self.worker_thread.start()
-        
-    def cancel_processing(self):
-        """Cancel the processing."""
-        self.cancel_requested = True
-        if hasattr(self, 'worker'):
-            self.worker.cancel()
-        self.status_label.setText("Cancelling...")
-        
-    def update_progress(self, percent):
-        """Update progress bar."""
-        self.progress_bar.setValue(percent)
-        
-    def update_status(self, message):
-        """Update status message."""
-        self.details_text.append(message)
-        # Auto-scroll to bottom
-        scrollbar = self.details_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-        
-    def handle_error(self, error_msg):
-        """Handle error during processing."""
-        self.details_text.append(f"ERROR: {error_msg}")
-        
-    def processing_finished(self, success_count, total_count):
-        """Handle processing completion."""
-        self.is_processing = False
-        self.process_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-        self.folder_list.setEnabled(True)
-        self.select_all_btn.setEnabled(True)
-        self.clear_all_btn.setEnabled(True)
-        
-        if self.cancel_requested:
-            self.status_label.setText(f"Cancelled. Processed {success_count} of {total_count} documents.")
-        else:
-            self.status_label.setText(f"Completed! Processed {success_count} of {total_count} documents.")
-        
-        # Clean up thread
-        if hasattr(self, 'worker_thread'):
-            self.worker_thread.quit()
-            self.worker_thread.wait()
-
-class FastIndexWorker(QObject):
-    """Worker thread for creating fast index."""
-    progress = pyqtSignal(int)
-    status = pyqtSignal(str)
-    finished = pyqtSignal(int, int)  # success_count, total_count
-    error = pyqtSignal(str)
-    
-    def __init__(self, documents: List[DocumentInfo], word_handler: WordHandler):
-        super().__init__()
-        self.documents = documents
-        self.word_handler = word_handler
-        self.is_cancelled = False
-        
-    def cancel(self):
-        """Request cancellation."""
-        self.is_cancelled = True
-        
-    def process(self):
-        """Process all documents."""
-        total = len(self.documents)
-        success_count = 0
-        
-        try:
-            # Initialize COM for this thread
-            pythoncom.CoInitialize()
-            
-            # Create Word application once for efficiency
-            word_app = win32com.client.Dispatch("Word.Application")
-            word_app.Visible = False
-            word_app.ScreenUpdating = False
-            
-            for i, doc_info in enumerate(self.documents):
-                if self.is_cancelled:
-                    break
-                    
-                # Update progress
-                percent = int((i / total) * 100)
-                self.progress.emit(percent)
-                
-                # Check if clipboard file already exists
-                clipboard_path = str(doc_info.path) + ".clipboard"
-                if os.path.exists(clipboard_path):
-                    self.status.emit(f"Skipping {doc_info.name} - already cached")
-                    success_count += 1
-                    continue
-                
-                try:
-                    self.status.emit(f"Processing {doc_info.name}...")
-                    
-                    # Open document
-                    doc = word_app.Documents.Open(str(doc_info.path))
-                    
-                    # Copy entire content
-                    doc.Content.Copy()
-                    
-                    # Capture clipboard data
-                    clipboard_data = self.word_handler.capture_clipboard_formats()
-                    
-                    # Capture style information
-                    try:
-                        word_xml = doc.Content.XML
-                    except:
-                        word_xml = None  # Some documents may not support XML export
-                    
-                    # Create enhanced data structure
-                    enhanced_data = {
-                        'clipboard_data': clipboard_data,
-                        'word_xml': word_xml,
-                        'version': 2  # Version marker for compatibility
-                    }
-                    
-                    # Save enhanced data to file
-                    if self.word_handler.save_clipboard_to_file(enhanced_data, clipboard_path):
-                        success_count += 1
-                        self.status.emit(f"✓ Cached {doc_info.name}")
-                    else:
-                        self.error.emit(f"Failed to save cache for {doc_info.name}")
-                    
-                    # Close document
-                    doc.Close(False)
-                    
-                except Exception as e:
-                    self.error.emit(f"Error processing {doc_info.name}: {str(e)}")
-                    
-            # Clean up
-            try:
-                word_app.Quit()
-            except:
-                pass
-                
-        except Exception as e:
-            self.error.emit(f"Critical error: {str(e)}")
-            
-        finally:
-            pythoncom.CoUninitialize()
-            
-        # Final progress
-        self.progress.emit(100)
-        self.finished.emit(success_count, total)
 
 class DocxSearchApp(QMainWindow):
     """
@@ -7664,19 +7165,6 @@ class DocxSearchApp(QMainWindow):
     # update_index method has been removed
     
     # on_update_complete method has been removed
-    
-    def create_fast_index(self):
-        """Show the dialog to create fast index with clipboard caching."""
-        if not self.searcher.document_index:
-            QMessageBox.information(
-                self, 
-                "No Index", 
-                "No documents in index. Please add documents to the index first."
-            )
-            return
-            
-        dialog = FastIndexDialog(self.searcher, self)
-        dialog.exec()
 
     def _store_window_handle(self):
         """Store the Win32 window handle for later use."""
@@ -8067,11 +7555,6 @@ class DocxSearchApp(QMainWindow):
         # Update Index
         update_index_action = index_menu.addAction('Update Index...')
         update_index_action.triggered.connect(self.show_update_index)
-        
-        # Create Fast Index
-        index_menu.addSeparator()
-        fast_index_action = index_menu.addAction('Create Fast Index...')
-        fast_index_action.triggered.connect(self.create_fast_index)
         
         # Target document menu
         target_menu = menubar.addMenu('Send to Closed Doc')
