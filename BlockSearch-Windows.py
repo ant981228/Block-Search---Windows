@@ -790,7 +790,11 @@ class DocumentPreviewDialog(QDialog):
             "Light Blue": "#ADD8E6",
             "Green": "#90EE90"
         }
-        self.current_highlight_color = self.highlight_colors["Yellow"]  # Default
+        
+        # Load saved highlight color preference
+        self.settings = QSettings('DocxSearchApp', 'Settings')
+        saved_color = self.settings.value('preview_highlight_color', "Yellow")
+        self.current_highlight_color = self.highlight_colors.get(saved_color, self.highlight_colors["Yellow"])
         
         # Setup basic UI
         self.setWindowTitle(f"Preview: {Path(document_path).name}")
@@ -816,7 +820,15 @@ class DocumentPreviewDialog(QDialog):
         
         self.highlight_color_combo = QComboBox()
         self.highlight_color_combo.addItems(["Yellow", "Light Blue", "Green"])
-        self.highlight_color_combo.setCurrentIndex(0)  # Default to yellow
+        
+        # Set the combo box to the saved color
+        saved_color = self.settings.value('preview_highlight_color', "Yellow")
+        index = self.highlight_color_combo.findText(saved_color)
+        if index >= 0:
+            self.highlight_color_combo.setCurrentIndex(index)
+        else:
+            self.highlight_color_combo.setCurrentIndex(0)  # Default to yellow
+        
         self.highlight_color_combo.currentIndexChanged.connect(self.change_highlight_color)
         info_layout.addWidget(self.highlight_color_combo)
         
@@ -832,6 +844,18 @@ class DocumentPreviewDialog(QDialog):
         self.text_viewer = QTextEdit()
         self.text_viewer.setReadOnly(True)
         self.text_viewer.setWordWrapMode(QTextOption.WrapMode.WordWrap)
+        
+        # Always use white background and black text for readability with highlights
+        self.text_viewer.setStyleSheet("""
+            QTextEdit {
+                background-color: white;
+                color: black;
+                selection-background-color: #3399FF;
+                selection-color: white;
+                border: 1px solid #CCCCCC;
+            }
+        """)
+        
         layout.addWidget(self.text_viewer)
         
         # Button row
@@ -871,6 +895,9 @@ class DocumentPreviewDialog(QDialog):
         color_name = self.highlight_color_combo.currentText()
         self.current_highlight_color = self.highlight_colors[color_name]
         
+        # Save the selected color preference
+        self.settings.setValue('preview_highlight_color', color_name)
+        
         # Refresh the view
         self.load_with_fallback()
     
@@ -883,7 +910,7 @@ class DocumentPreviewDialog(QDialog):
             document = docx.Document(self.document_path)
             
             # Create HTML content from document with improved formatting
-            html_content = ["<html><body style='font-family: Arial, sans-serif; margin: 20px;'>"]
+            html_content = ["<html><body style='font-family: Arial, sans-serif; margin: 20px; color: black; background-color: white;'>"]
             
             # Process paragraphs with style information
             for para in document.paragraphs:
@@ -7709,8 +7736,30 @@ class DocxSearchApp(QMainWindow):
     
     def apply_light_theme(self):
         """Apply light theme styling to the application."""
-        # Reset to default light palette
+        # Create explicit light palette to override system theme
         light_palette = QPalette()
+        
+        # Window colors
+        light_palette.setColor(QPalette.ColorRole.Window, QColor(240, 240, 240))
+        light_palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
+        
+        # Base colors (for input fields)
+        light_palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+        light_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(245, 245, 245))
+        
+        # Text colors
+        light_palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
+        light_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+        
+        # Button colors
+        light_palette.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
+        light_palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
+        
+        # Highlight colors
+        light_palette.setColor(QPalette.ColorRole.Highlight, QColor(48, 140, 198))
+        light_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+        
+        # Apply the palette
         QApplication.instance().setPalette(light_palette)
         
         # Update component-specific styles
