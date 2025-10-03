@@ -7524,38 +7524,25 @@ class DocxSearchApp(QMainWindow):
         """Create application menus with comprehensive document management options."""
         menubar = self.menuBar()
         
-        # Search settings menu
-        settings_menu = menubar.addMenu('Search Settings')
-        select_folder_action = settings_menu.addAction('Select Search Folder')
+        # Search menu
+        search_menu = menubar.addMenu('Search')
+        select_folder_action = search_menu.addAction('Select Search Folder')
         select_folder_action.triggered.connect(self.select_search_folder)
-        show_folder_action = settings_menu.addAction('Show Current Folder')
+        show_folder_action = search_menu.addAction('Show Current Search Folder')
         show_folder_action.triggered.connect(self.show_current_folder)
         
-        reindex_action = settings_menu.addAction('Reindex')
-        reindex_action.triggered.connect(self.reindex_documents)
-        
-        # Add Configure Shortcut option to Settings menu
-        settings_menu.addSeparator()
+        # Add separator
+        search_menu.addSeparator()
         
         # Add option to include path names in search
-        self.include_path_action = settings_menu.addAction('Include Path in Search')
+        self.include_path_action = search_menu.addAction('Include Path in Search')
         self.include_path_action.setCheckable(True)
         self.include_path_action.setChecked(self.settings.value('include_path_in_search', False, type=bool))
         self.include_path_action.setShortcut('Ctrl+Shift+P')  # Add keyboard shortcut
         self.include_path_action.triggered.connect(self.toggle_include_path)
         
-        # Add dark mode toggle
-        self.dark_mode_action = settings_menu.addAction('Dark Mode')
-        self.dark_mode_action.setCheckable(True)
-        self.dark_mode_action.setChecked(self.settings.value('dark_mode', False, type=bool))
-        self.dark_mode_action.setShortcut('Ctrl+Shift+M')  # Add keyboard shortcut
-        self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
-        
-        configure_shortcut_action = settings_menu.addAction('Set Window Focus Shortcut...')
-        configure_shortcut_action.triggered.connect(self.configure_shortcut)
-        
         # Add Prefix Configuration submenu
-        prefix_menu = settings_menu.addMenu('Prefix Configuration')
+        prefix_menu = search_menu.addMenu('Prefix Configuration')
         
         manage_prefixes_action = prefix_menu.addAction('Manage Prefixes...')
         manage_prefixes_action.triggered.connect(self.show_prefix_manager)
@@ -7569,8 +7556,8 @@ class DocxSearchApp(QMainWindow):
         export_prefixes_action.triggered.connect(self.export_prefixes)
         
         # Add Quit button to Settings menu
-        settings_menu.addSeparator()
-        quit_action = settings_menu.addAction('Quit')
+        search_menu.addSeparator()
+        quit_action = search_menu.addAction('Quit')
         quit_action.setShortcuts([QKeySequence("Alt+F4"), QKeySequence("Ctrl+Q")])
         quit_action.triggered.connect(self.quit_application)
 
@@ -7585,21 +7572,25 @@ class DocxSearchApp(QMainWindow):
         update_index_action = index_menu.addAction('Update Index...')
         update_index_action.triggered.connect(self.show_update_index)
         
+        # Refresh (formerly Reindex)
+        refresh_action = index_menu.addAction('Refresh')
+        refresh_action.triggered.connect(self.reindex_documents)
+        
         # Open Documents menu with paste mode options
         open_docs_menu = menubar.addMenu('Send to Doc')
         
-        # Open dialog action replaces refresh since menu auto-refreshes
-        open_dialog_action = open_docs_menu.addAction('Open Dialog...')
+        # Select target document action
+        select_target_action = open_docs_menu.addAction('Select Target Doc...')
         # Shortcut already defined as global action
-        open_dialog_action.triggered.connect(self.show_document_selector)
+        select_target_action.triggered.connect(self.show_document_selector)
         
         # Auto-refresh when menu is opened
         open_docs_menu.aboutToShow.connect(self.refresh_open_documents)
         
         open_docs_menu.addSeparator()
         
-        # Add Clear Destination functionality
-        clear_target_action = open_docs_menu.addAction('Clear Destination')
+        # Add Clear Target Doc functionality
+        clear_target_action = open_docs_menu.addAction('Clear Target Doc')
         clear_target_action.setShortcut('Ctrl+Shift+T')
         clear_target_action.triggered.connect(self.clear_target_document)
         
@@ -7687,9 +7678,22 @@ class DocxSearchApp(QMainWindow):
         self.reverse_sort_action.setCheckable(True)
         self.reverse_sort_action.triggered.connect(self.perform_search)
         
-        # Add Help menu
-        help_menu = menubar.addMenu('Help')
-        show_help_action = help_menu.addAction('Show Help')
+        # Add Settings menu (formerly Help)
+        settings_menu = menubar.addMenu('Settings')
+        
+        # Add dark mode toggle
+        self.dark_mode_action = settings_menu.addAction('Dark Mode')
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(self.settings.value('dark_mode', False, type=bool))
+        self.dark_mode_action.setShortcut('Ctrl+Shift+M')  # Add keyboard shortcut
+        self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
+        
+        configure_shortcut_action = settings_menu.addAction('Set Window Focus Shortcut...')
+        configure_shortcut_action.triggered.connect(self.configure_shortcut)
+        
+        settings_menu.addSeparator()
+        
+        show_help_action = settings_menu.addAction('Show Help')
         show_help_action.setShortcut('F1')  # Standard help shortcut
         show_help_action.triggered.connect(self.show_help)
 
