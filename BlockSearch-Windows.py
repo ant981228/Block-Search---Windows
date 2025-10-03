@@ -6392,8 +6392,12 @@ class WordHandler:
                         print(f"InsertFile failed: {e}, falling back to clipboard method")
                         # Fallback to clipboard method if InsertFile fails
                         with self.open_document(word_app, source_path) as source_doc:
-                            source_doc.Content.Copy()
-                        selection.Paste()
+                            if source_doc is not None:
+                                source_doc.Content.Copy()
+                                selection.Paste()
+                            else:
+                                print(f"Failed to open source document for clipboard fallback: {source_path}")
+                                return False
                 
                 return True
         
@@ -6472,8 +6476,12 @@ class WordHandler:
                         print(f"InsertFile failed: {e}, falling back to clipboard method")
                         # Fallback to clipboard method if InsertFile fails
                         with self.open_document(word_app, source_path) as source_doc:
-                            source_doc.Content.Copy()
-                        word_app.Selection.Paste()
+                            if source_doc is not None:
+                                source_doc.Content.Copy()
+                                word_app.Selection.Paste()
+                            else:
+                                print(f"Failed to open source document for clipboard fallback: {source_path}")
+                                return False
                     
                     # Important: Move cursor to end of inserted content
                     try:
@@ -7014,7 +7022,6 @@ class DocxSearchApp(QMainWindow):
         
         # Load saved paths and states
         self.search_folder = self.settings.value('search_folder', os.getcwd())
-        self.target_document = self.settings.value('target_document', None)
         self.active_target_id = None
         
         # Load shortcut configuration
@@ -7468,18 +7475,6 @@ class DocxSearchApp(QMainWindow):
                 else f"Error pasting to active document at {mode_str}"
             )
             
-        elif self.target_document:
-            # For target documents, we still use the standard transfer
-            success = self.searcher.word_handler.transfer_content(
-                file_path,
-                self.target_document
-            )
-            status_msg = (
-                f"Transferred '{Path(file_path).name}' to '{Path(self.target_document).name}'"
-                if success
-                else "Error transferring content. Check target document."
-            )
-            
         else:
             # Clipboard mode has no alternate
             success = self.searcher.word_handler.copy_to_clipboard(file_path)
@@ -7556,22 +7551,8 @@ class DocxSearchApp(QMainWindow):
         update_index_action = index_menu.addAction('Update Index...')
         update_index_action.triggered.connect(self.show_update_index)
         
-        # Target document menu
-        target_menu = menubar.addMenu('Send to Closed Doc')
-        select_target_action = target_menu.addAction('Select Destination...')
-        select_target_action.setShortcut('Ctrl+T')
-        select_target_action.triggered.connect(self.select_target_document)
-        
-        clear_target_action = target_menu.addAction('Clear Destination')
-        clear_target_action.setShortcut('Ctrl+Shift+T')
-        clear_target_action.triggered.connect(self.clear_target_document)
-        
-        target_menu.addSeparator()
-        show_target_action = target_menu.addAction('Show Destination Info')
-        show_target_action.triggered.connect(self.show_target_document)
-        
         # Open Documents menu with paste mode options
-        open_docs_menu = menubar.addMenu('Send to Open Doc')
+        open_docs_menu = menubar.addMenu('Send to Doc')
         
         # Open dialog action replaces refresh since menu auto-refreshes
         open_dialog_action = open_docs_menu.addAction('Open Dialog...')
@@ -7580,6 +7561,13 @@ class DocxSearchApp(QMainWindow):
         
         # Auto-refresh when menu is opened
         open_docs_menu.aboutToShow.connect(self.refresh_open_documents)
+        
+        open_docs_menu.addSeparator()
+        
+        # Add Clear Destination functionality
+        clear_target_action = open_docs_menu.addAction('Clear Destination')
+        clear_target_action.setShortcut('Ctrl+Shift+T')
+        clear_target_action.triggered.connect(self.clear_target_document)
         
         open_docs_menu.addSeparator()
         
@@ -8025,17 +8013,6 @@ class DocxSearchApp(QMainWindow):
                 else f"Error pasting to active document at {mode_str}"
             )
             
-        elif self.target_document:
-            # Use existing file target logic
-            success = self.searcher.word_handler.transfer_content(
-                file_path,
-                self.target_document
-            )
-            status_msg = (
-                f"Transferred '{Path(file_path).name}' to '{Path(self.target_document).name}'"
-                if success
-                else "Error transferring content. Check target document."
-            )
             
         else:
             # Clipboard mode
@@ -8060,17 +8037,6 @@ class DocxSearchApp(QMainWindow):
                     border: 1px solid #b8d6f3;
                 }
             """)
-        elif self.target_document:
-            target_name = Path(self.target_document).name
-            self.target_status.setText(f"Target: {target_name}")
-            self.target_status.setStyleSheet("""
-                QLineEdit {
-                    background-color: #e6ffe6;
-                    color: #000000;
-                    padding: 2px 5px;
-                    border: 1px solid #b8f3b8;
-                }
-            """)
         else:
             self.target_status.clear()
             self.target_status.setPlaceholderText("No target document selected (using clipboard)")
@@ -8089,7 +8055,7 @@ class DocxSearchApp(QMainWindow):
     def refresh_open_documents(self):
         """Update the list of open documents in the menu."""
         # Clear existing document actions
-        for action in self.open_docs_menu.actions()[2:]:  # Skip "Open Dialog..." and separator
+        for action in self.open_docs_menu.actions()[4:]:  # Skip "Open Dialog...", separator, "Clear Destination", separator
             self.open_docs_menu.removeAction(action)
         
         # Get current open documents using cached list for better performance
@@ -8132,7 +8098,7 @@ class DocxSearchApp(QMainWindow):
     
     def set_active_target(self, doc: ActiveDocument):
         """Set an open document as the paste target."""
-        self.target_document = None  # Clear file target
+        # Note: Only using active document targeting
         self.active_target_id = doc.doc_id
         self._update_target_status()
         self.statusBar().showMessage(f"Set active target to: {doc.name}", 3000)
@@ -8144,39 +8110,9 @@ class DocxSearchApp(QMainWindow):
         except:
             pass
 
-    def select_target_document(self):
-        """Open file dialog for selecting target document."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Target Document",
-            self.search_folder,
-            "Word Documents (*.docx)"
-        )
-        
-        if file_path:
-            try:
-                # Validate document
-                with self.searcher.word_handler.word_session() as word_app:
-                    with self.searcher.word_handler.open_document(word_app, file_path):
-                        pass
-                    word_app.ScreenUpdating = True
-
-                self.active_target_id = None  # Clear active document target
-                self.target_document = file_path
-                self.settings.setValue('target_document', file_path)
-                self._update_target_status()
-                self.statusBar().showMessage(f"Target document set: {Path(file_path).name}", 3000)
-                
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "Invalid Target Document",
-                    f"Could not use selected document as target: {str(e)}"
-                )
-    
     def clear_target_document(self):
         """Clear target document setting."""
-        if self.target_document or self.active_target_id:
+        if self.active_target_id:
             reply = QMessageBox.question(
                 self,
                 "Clear Target Document",
@@ -8186,49 +8122,9 @@ class DocxSearchApp(QMainWindow):
             )
             
             if reply == QMessageBox.StandardButton.Yes:
-                self.target_document = None
                 self.active_target_id = None
-                self.settings.setValue('target_document', None)
                 self._update_target_status()
                 self.statusBar().showMessage("Target document cleared", 3000)
-    
-    def show_target_document(self):
-        """Display current target document information."""
-        if self.active_target_id:
-            QMessageBox.information(
-                self,
-                "Target Document",
-                "Currently targeting an open document.\n"
-                "Content will be pasted at the cursor position."
-            )
-        elif self.target_document:
-            target_path = Path(self.target_document)
-            try:
-                modified_time = target_path.stat().st_mtime
-                modified_str = datetime.fromtimestamp(modified_time).strftime('%Y-%m-%d %H:%M:%S')
-                
-                QMessageBox.information(
-                    self,
-                    "Target Document",
-                    f"Current target document:\n"
-                    f"Name: {target_path.name}\n"
-                    f"Path: {target_path}\n"
-                    f"Last modified: {modified_str}"
-                )
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "Target Document Error",
-                    f"Error accessing target document:\n{str(e)}\n\n"
-                    "You may want to clear and reselect the target document."
-                )
-        else:
-            QMessageBox.information(
-                self,
-                "Target Document",
-                "No target document set.\n"
-                "Content will be copied to clipboard."
-            )
     
     def index_documents(self):
         """Update document index and UI using multithreading."""
@@ -8429,17 +8325,6 @@ class DocxSearchApp(QMainWindow):
                 else f"Error pasting to active document at {mode_str}"
             )
             
-        elif self.target_document:
-            # Use existing file target logic
-            success = self.searcher.word_handler.transfer_content(
-                file_path,
-                self.target_document
-            )
-            status_msg = (
-                f"Transferred '{Path(file_path).name}' to '{Path(self.target_document).name}'"
-                if success
-                else "Error transferring content. Check target document."
-            )
             
         else:
             # Clipboard mode
