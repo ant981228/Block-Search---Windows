@@ -7355,9 +7355,26 @@ class DocxSearchApp(QMainWindow):
         
         context_header_layout.addStretch()
         
+        # Add spacing before buttons
+        context_header_layout.addSpacing(10)
+        
+        # Add send to cursor button
+        send_btn = QPushButton("→")  # Unicode right arrow
+        send_btn.setToolTip("Send all items to cursor position")
+        send_btn.setMaximumWidth(30)
+        send_btn.clicked.connect(lambda: self.send_all_context_to_target(PasteMode.CURSOR))
+        context_header_layout.addWidget(send_btn)
+        
+        # Add send to end button
+        send_end_btn = QPushButton("⇥")  # Unicode right arrow with bar
+        send_end_btn.setToolTip("Send all items to end of document")
+        send_end_btn.setMaximumWidth(30)
+        send_end_btn.clicked.connect(lambda: self.send_all_context_to_target(PasteMode.END))
+        context_header_layout.addWidget(send_end_btn)
+        
         # Add close button
         close_context_btn = QPushButton("×")  # Unicode × character
-        close_context_btn.setToolTip("Close context view (Right Arrow)")
+        close_context_btn.setToolTip("Close context view")
         close_context_btn.setMaximumWidth(30)
         close_context_btn.clicked.connect(self.close_document_context)
         context_header_layout.addWidget(close_context_btn)
@@ -7884,7 +7901,11 @@ class DocxSearchApp(QMainWindow):
         current_index = related_docs.index(doc_info) if doc_info in related_docs else 0
         
         # Set document context title
-        if doc_info.original_doc_path:
+        if doc_info.parent_doc_name:
+            # Show the parent section/heading name that contains all siblings
+            self.context_title.setText(f"Context: {doc_info.parent_doc_name}")
+        elif doc_info.original_doc_path:
+            # Fallback to original document name if no parent
             self.context_title.setText(f"Context: {Path(doc_info.original_doc_path).name}")
         else:
             self.context_title.setText("Document Context View")
@@ -7947,6 +7968,63 @@ class DocxSearchApp(QMainWindow):
         
         # Update status bar
         self.statusBar().showMessage("Returned to search results", 3000)
+    
+    def send_all_context_to_target(self, mode: str):
+        """Send all siblings in the context view to the target document.
+        
+        Args:
+            mode: Paste mode - either PasteMode.CURSOR or PasteMode.END
+        """
+        # Check if there's a target document
+        if not self.active_target_id:
+            QMessageBox.warning(
+                self, 
+                "No Target Document", 
+                "Please set a target document first. This function only works with a target document, not in clipboard mode."
+            )
+            return
+        
+        # Get all items from the context list
+        items_to_send = []
+        for i in range(self.context_list.count()):
+            item = self.context_list.item(i)
+            doc_info = item.data(Qt.ItemDataRole.UserRole + 1)
+            if doc_info:
+                items_to_send.append((item, doc_info))
+        
+        if not items_to_send:
+            self.statusBar().showMessage("No items to send", 3000)
+            return
+        
+        # Send each item to the target document in order
+        success_count = 0
+        total_count = len(items_to_send)
+        
+        mode_text = "to end of" if mode == PasteMode.END else "to cursor in"
+        self.statusBar().showMessage(f"Sending {total_count} items {mode_text} target document...")
+        
+        for item, doc_info in items_to_send:
+            try:
+                # Use the same logic as when activating a single item
+                file_path = doc_info.path
+                if file_path.exists():
+                    if self.searcher.word_handler.paste_to_active_document(str(file_path), self.active_target_id, mode=mode):
+                        success_count += 1
+                    else:
+                        print(f"Failed to send: {doc_info.name}")
+                else:
+                    print(f"File not found: {file_path}")
+            except Exception as e:
+                print(f"Error sending {doc_info.name}: {e}")
+        
+        # Show result message
+        if success_count == total_count:
+            self.statusBar().showMessage(f"Successfully sent all {total_count} items {mode_text} target document", 5000)
+        else:
+            self.statusBar().showMessage(f"Sent {success_count} of {total_count} items {mode_text} target document", 5000)
+        
+        # Close the context view after sending
+        self.close_document_context()
     
     def on_context_item_activated(self, item: QListWidgetItem):
         """Handle item activation from the context list."""
