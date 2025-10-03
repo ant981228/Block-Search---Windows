@@ -7033,6 +7033,7 @@ class DocxSearchApp(QMainWindow):
         # Load saved paths and states
         self.search_folder = self.settings.value('search_folder', os.getcwd())
         self.active_target_id = None
+        self.active_target_name = None
         
         # Load shortcut configuration
         self.activation_shortcut = self.settings.value('activation_shortcut', 'ctrl+space')
@@ -8270,7 +8271,8 @@ class DocxSearchApp(QMainWindow):
     def _update_target_status(self):
         """Update the target document status display with enhanced visibility."""
         if self.active_target_id:
-            self.target_status.setText("Target: [Active Document]")
+            target_text = f"Target: {self.active_target_name}" if self.active_target_name else "Target: [Active Document]"
+            self.target_status.setText(target_text)
             self.target_status.setStyleSheet("""
                 QLineEdit {
                     background-color: #e6f3ff;
@@ -8342,6 +8344,7 @@ class DocxSearchApp(QMainWindow):
         """Set an open document as the paste target."""
         # Note: Only using active document targeting
         self.active_target_id = doc.doc_id
+        self.active_target_name = doc.name
         self._update_target_status()
         self.statusBar().showMessage(f"Set active target to: {doc.name}", 3000)
 
@@ -8365,6 +8368,7 @@ class DocxSearchApp(QMainWindow):
             
             if reply == QMessageBox.StandardButton.Yes:
                 self.active_target_id = None
+                self.active_target_name = None
                 self._update_target_status()
                 self.statusBar().showMessage("Target document cleared", 3000)
     
