@@ -506,16 +506,11 @@ class HelpDialog(QDialog):
         <p>When you click on a document in search results, the content is handled based on your settings:</p>
         <ul>
             <li><b>Clipboard Mode:</b> Content is copied to clipboard (default when no target is set)</li>
-            <li><b>Target Document Mode:</b> Content is appended to your selected closed document</li>
             <li><b>Active Document Mode:</b> Content is pasted into an open Word document</li>
         </ul>
         
-        <h3>Setting a Target Document:</h3>
-        <p>Use <b>Send to Closed Doc → Select Destination</b> to choose a document to receive content.
-        Your block will be added to the end of this file when you click.</p>
-        
         <h3>Using Open Word Documents:</h3>
-        <p>The <b>Send to Open Doc</b> menu shows currently open Word documents:
+        <p>The <b>Send to Doc</b> menu shows currently open Word documents and provides document targeting options:
         <ol>
             <li>Select a document from the menu to set it as the active target</li>
             <li>Use <b>Default Paste Mode</b> to control where content is inserted:
@@ -525,6 +520,7 @@ class HelpDialog(QDialog):
                 </ul>
             </li>
             <li>Press <b>Ctrl+Enter</b> to use the alternate paste mode</li>
+            <li>Use <b>Clear Destination</b> to return to clipboard mode</li>
         </ol>
         """
         
@@ -703,12 +699,8 @@ class HelpDialog(QDialog):
                 <td>Hide application window</td>
             </tr>
             <tr>
-                <td><b>Ctrl+T</b></td>
-                <td>Select (closed) target document</td>
-            </tr>
-            <tr>
                 <td><b>Ctrl+Shift+T</b></td>
-                <td>Clear (closed) target document</td>
+                <td>Clear target document</td>
             </tr>
             <tr>
                 <td><b>Ctrl+Shift+D</b></td>
