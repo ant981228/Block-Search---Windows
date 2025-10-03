@@ -54,6 +54,7 @@ from PyQt6.QtGui import (
 )
 
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDialog,
     QDialogButtonBox,
@@ -5811,29 +5812,36 @@ class DocumentContextList(QListWidget):
     List widget for displaying document context (related documents from the same source).
     """
     itemActivated = pyqtSignal(QListWidgetItem)  # Standard activation (Enter key)
-    ctrlEnterPressed = pyqtSignal(QListWidgetItem)  # For alternate paste mode
+    enterPressed = pyqtSignal(list)  # New signal for regular Enter with all selected items
+    ctrlEnterPressed = pyqtSignal(QListWidgetItem)  # For alternate paste mode (single item)
+    ctrlEnterMultiPressed = pyqtSignal(list)  # For alternate paste mode (multi-selection)
     closeContextView = pyqtSignal()  # Signal to close the context view (Right arrow)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Enable multi-selection
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Handle key press events with special handling for navigation."""
         # Handle standard activation with Enter
         if (event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
-            current_item = self.currentItem()
-            if current_item:
-                self.itemActivated.emit(current_item)
+            selected_items = self.selectedItems()
+            if selected_items:
+                self.enterPressed.emit(selected_items)
                 event.accept()
                 return
                 
         # Handle Ctrl+Enter for alternate paste mode
         elif ((event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and 
               event.modifiers() == Qt.KeyboardModifier.ControlModifier):
-            current_item = self.currentItem()
-            if current_item:
-                self.ctrlEnterPressed.emit(current_item)
+            selected_items = self.selectedItems()
+            if selected_items:
+                if len(selected_items) == 1:
+                    self.ctrlEnterPressed.emit(selected_items[0])
+                else:
+                    self.ctrlEnterMultiPressed.emit(selected_items)
                 event.accept()
                 return
         
@@ -5852,6 +5860,7 @@ class EnhancedResultsList(QListWidget):
     and Left arrow for showing document context.
     """
     ctrlEnterPressed = pyqtSignal(QListWidgetItem)
+    enterPressed = pyqtSignal(list)  # New signal for regular Enter with all selected items
     showDocumentContext = pyqtSignal(DocumentInfo)  # New signal for context view
     focusSearchInput = pyqtSignal()  # Signal to request focus back to search input
     
@@ -5863,6 +5872,15 @@ class EnhancedResultsList(QListWidget):
             current_item = self.currentItem()
             if current_item:
                 self.ctrlEnterPressed.emit(current_item)
+                event.accept()
+                return
+        
+        # Handle regular Enter for default paste mode with all selected items
+        elif ((event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter) and 
+              event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            selected_items = self.selectedItems()
+            if selected_items:
+                self.enterPressed.emit(selected_items)
                 event.accept()
                 return
         
@@ -7333,11 +7351,15 @@ class DocxSearchApp(QMainWindow):
         # Initialize results list using our enhanced version
         self.results_list = EnhancedResultsList()
         self.results_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Enable multi-selection
+        self.results_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # Connect signals
         self.results_list.itemActivated.connect(self.on_item_activated)
+        self.results_list.enterPressed.connect(self.on_enter_pressed)
         self.results_list.ctrlEnterPressed.connect(self.on_ctrl_enter_activated)
         self.results_list.showDocumentContext.connect(self.show_document_context)
         self.results_list.focusSearchInput.connect(self.focus_search)
+        self.results_list.itemSelectionChanged.connect(self.on_selection_changed)
         
         # Create context panel (initially hidden)
         self.context_frame = QFrame()
@@ -7385,10 +7407,12 @@ class DocxSearchApp(QMainWindow):
         self.context_list = DocumentContextList()
         # Connect activate signal (Enter key)
         self.context_list.itemActivated.connect(self.on_context_item_activated)
+        self.context_list.enterPressed.connect(self.on_context_enter_pressed)
         # Connect double-click signal explicitly
         self.context_list.itemDoubleClicked.connect(self.on_context_item_activated)
         # Connect other signals
         self.context_list.ctrlEnterPressed.connect(self.on_context_ctrl_enter_activated)
+        self.context_list.ctrlEnterMultiPressed.connect(self.on_context_ctrl_enter_multi_activated)
         self.context_list.closeContextView.connect(self.close_document_context)
         context_layout.addWidget(self.context_list)
         
@@ -7833,26 +7857,64 @@ class DocxSearchApp(QMainWindow):
 
     def on_item_activated(self, item: QListWidgetItem):
         """Handle document selection using current default paste mode."""
-        print("Regular item activation")
-        file_path = item.data(Qt.ItemDataRole.UserRole)
+        # Get all selected items
+        selected_items = self.results_list.selectedItems()
         
-        # Use the current default mode
-        use_cursor_mode = self.cursor_mode_action.isChecked()
-        self._process_item(file_path, use_cursor_mode)
+        if len(selected_items) <= 1:
+            # Single item selected
+            print("Single item activation")
+            file_path = item.data(Qt.ItemDataRole.UserRole)
+            use_cursor_mode = self.cursor_mode_action.isChecked()
+            self._process_item(file_path, use_cursor_mode)
+        else:
+            # Multiple items selected - send all in order
+            print(f"Multi-item activation: {len(selected_items)} items")
+            use_cursor_mode = self.cursor_mode_action.isChecked()
+            self._process_multiple_items(selected_items, use_cursor_mode)
+    
+    def on_enter_pressed(self, selected_items: list):
+        """Handle Enter key press with all selected items."""
+        if len(selected_items) <= 1:
+            # Single item - use original logic
+            if selected_items:
+                print("Enter single item activation")
+                file_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+                use_cursor_mode = self.cursor_mode_action.isChecked()
+                self._process_item(file_path, use_cursor_mode)
+        else:
+            # Multiple items selected - send all in order
+            print(f"Enter multi-item activation: {len(selected_items)} items")
+            use_cursor_mode = self.cursor_mode_action.isChecked()
+            self._process_multiple_items(selected_items, use_cursor_mode)
 
     def on_ctrl_enter_activated(self, item: QListWidgetItem):
         """Handle document selection using alternate paste mode."""
-        print("Ctrl+Enter item activation")
-        file_path = item.data(Qt.ItemDataRole.UserRole)
+        # Get all selected items
+        selected_items = self.results_list.selectedItems()
         
-        # Use the opposite of the current default mode
-        use_cursor_mode = not self.cursor_mode_action.isChecked()
-        self._process_item(file_path, use_cursor_mode)
+        if len(selected_items) <= 1:
+            # Single item selected
+            print("Ctrl+Enter single item activation")
+            file_path = item.data(Qt.ItemDataRole.UserRole)
+            use_cursor_mode = not self.cursor_mode_action.isChecked()
+            self._process_item(file_path, use_cursor_mode)
+        else:
+            # Multiple items selected - send all in order
+            print(f"Ctrl+Enter multi-item activation: {len(selected_items)} items")
+            use_cursor_mode = not self.cursor_mode_action.isChecked()
+            self._process_multiple_items(selected_items, use_cursor_mode)
 
     def show_document_preview(self, item=None):
         """Show preview of the selected document."""
         if item is None:
-            item = self.results_list.currentItem()
+            # Get selected items - if multiple, preview the first one
+            selected_items = self.results_list.selectedItems()
+            if selected_items:
+                item = selected_items[0]  # Preview first selected item
+                if len(selected_items) > 1:
+                    self.statusBar().showMessage(f"Previewing first of {len(selected_items)} selected items", 3000)
+            else:
+                item = self.results_list.currentItem()
             
         if not item:
             self.statusBar().showMessage("No document selected to preview", 3000)
@@ -8059,6 +8121,71 @@ class DocxSearchApp(QMainWindow):
         
         # Return focus to the context list
         self.context_list.setFocus()
+    
+    def on_context_enter_pressed(self, selected_items: list):
+        """Handle Enter key press with multiple selected items in context view."""
+        if not selected_items:
+            return
+            
+        if len(selected_items) == 1:
+            # Single item - use existing logic
+            path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+            if path:
+                use_cursor_mode = self.cursor_mode_action.isChecked()
+                self._process_item(path, use_cursor_mode)
+                self.statusBar().showMessage(f"Document sent to target. Use right arrow to exit context view.", 3000)
+        else:
+            # Multiple items - process all
+            self._process_context_multiple_items(selected_items, self.cursor_mode_action.isChecked())
+        
+        # Return focus to the context list
+        self.context_list.setFocus()
+    
+    def on_context_ctrl_enter_multi_activated(self, selected_items: list):
+        """Handle Ctrl+Enter activation with multiple selected items from context list."""
+        if not selected_items:
+            return
+            
+        # Process all items with alternate paste mode
+        use_cursor_mode = not self.cursor_mode_action.isChecked()
+        self._process_context_multiple_items(selected_items, use_cursor_mode)
+        
+        # Return focus to the context list
+        self.context_list.setFocus()
+    
+    def _process_context_multiple_items(self, selected_items: list, use_cursor_mode: bool):
+        """Process multiple selected items from context view."""
+        if not self.active_target_id:
+            # Context view should only work with target documents
+            self.statusBar().showMessage("Multi-selection requires a target document", 3000)
+            return
+        
+        # Send all items to target document
+        paste_mode = PasteMode.CURSOR if use_cursor_mode else PasteMode.END
+        success_count = 0
+        total_count = len(selected_items)
+        
+        mode_str = "cursor position" if paste_mode == PasteMode.CURSOR else "document end"
+        self.statusBar().showMessage(f"Sending {total_count} context items to {mode_str}...")
+        
+        for item in selected_items:
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if path:
+                try:
+                    if self.searcher.word_handler.paste_to_active_document(
+                        path,
+                        self.active_target_id,
+                        mode=paste_mode
+                    ):
+                        success_count += 1
+                except Exception as e:
+                    print(f"Error sending {Path(path).name}: {e}")
+        
+        # Report results
+        if success_count == total_count:
+            self.statusBar().showMessage(f"Successfully sent all {total_count} context items to {mode_str}. Use right arrow to exit.", 5000)
+        else:
+            self.statusBar().showMessage(f"Sent {success_count} of {total_count} context items to {mode_str}. Use right arrow to exit.", 5000)
 
     def _process_item(self, file_path: str, use_cursor_mode: bool):
         """Process a document with the specified paste mode."""
@@ -8094,6 +8221,51 @@ class DocxSearchApp(QMainWindow):
             )
         
         self.statusBar().showMessage(status_msg, 3000)
+    
+    def _process_multiple_items(self, selected_items: list, use_cursor_mode: bool):
+        """Process multiple selected documents in display order."""
+        if not self.active_target_id:
+            # In clipboard mode, just copy the first item
+            if selected_items:
+                file_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+                success = self.searcher.word_handler.copy_to_clipboard(file_path)
+                self.statusBar().showMessage(
+                    f"Copied first selected item to clipboard (multi-selection not supported in clipboard mode)", 3000
+                )
+            return
+        
+        # Send all items to target document
+        paste_mode = PasteMode.CURSOR if use_cursor_mode else PasteMode.END
+        success_count = 0
+        total_count = len(selected_items)
+        
+        mode_str = "cursor position" if paste_mode == PasteMode.CURSOR else "document end"
+        self.statusBar().showMessage(f"Sending {total_count} items to {mode_str}...")
+        
+        for item in selected_items:
+            file_path = item.data(Qt.ItemDataRole.UserRole)
+            if file_path:
+                try:
+                    if self.searcher.word_handler.paste_to_active_document(
+                        file_path,
+                        self.active_target_id,
+                        mode=paste_mode
+                    ):
+                        success_count += 1
+                except Exception as e:
+                    print(f"Error sending {Path(file_path).name}: {e}")
+        
+        # Report results
+        if success_count == total_count:
+            self.statusBar().showMessage(f"Successfully sent all {total_count} items to {mode_str}", 5000)
+        else:
+            self.statusBar().showMessage(f"Sent {success_count} of {total_count} items to {mode_str}", 5000)
+    
+    def on_selection_changed(self):
+        """Update status when selection changes in the results list."""
+        selected_count = len(self.results_list.selectedItems())
+        if selected_count > 1:
+            self.statusBar().showMessage(f"{selected_count} items selected", 2000)
         
     def _update_target_status(self):
         """Update the target document status display with enhanced visibility."""
