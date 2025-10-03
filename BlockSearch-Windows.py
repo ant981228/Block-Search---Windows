@@ -430,19 +430,36 @@ class HelpDialog(QDialog):
         
         <h3>Getting Started:</h3>
         <ol>
-            <li>Select the folder with your blocks from <b>Search Settings → Select Search Folder</b></li>
+            <li>Select the folder with your blocks from <b>Search → Select Search Folder</b></li>
             <li>Type in the search box to find documents</li>
             <li>Click on a document to copy its contents</li>
         </ol>
         
-        <h3>Search Settings:</h3>
-        <p>The <b>Search Settings</b> menu provides several useful options:</p>
+        <h3>Menu Overview:</h3>
+        <p>The application provides several menus for different functions:</p>
         <ul>
-            <li><b>Select Search Folder:</b> Choose the folder containing your documents</li>
-            <li><b>Show Current Folder:</b> Display information about the current search location</li>
-            <li><b>Reindex:</b> Refresh the document index to pick up new or modified files</li>
-            <li><b>Include Path in Search:</b> Include folder names when searching (Ctrl+Shift+P)</li>
-            <li><b>Prefix Configuration:</b> Set up shortcuts for searching specific folders</li>
+            <li><b>Search Menu:</b>
+                <ul>
+                    <li>Select Search Folder - Choose the folder containing your documents</li>
+                    <li>Show Current Search Folder - Display information about the current search location</li>
+                    <li>Include Path in Search - Include folder names when searching (Ctrl+Shift+P)</li>
+                    <li>Prefix Configuration - Set up shortcuts for searching specific folders</li>
+                </ul>
+            </li>
+            <li><b>Index Menu:</b>
+                <ul>
+                    <li>Add Files to Index - Split large documents into searchable blocks</li>
+                    <li>Update Index - Update existing index folders with new content</li>
+                    <li>Refresh - Refresh the document index to pick up new or modified files</li>
+                </ul>
+            </li>
+            <li><b>Settings Menu:</b>
+                <ul>
+                    <li>Dark Mode - Toggle dark theme (Ctrl+Shift+M)</li>
+                    <li>Set Window Focus Shortcut - Configure the keyboard shortcut to activate the window</li>
+                    <li>Show Help - Display this help dialog (F1)</li>
+                </ul>
+            </li>
         </ul>
         """
         
@@ -470,7 +487,7 @@ class HelpDialog(QDialog):
         <h3>Using Prefixes:</h3>
         <p>Prefixes let you limit searches to specific folders:</p>
         <ol>
-            <li>Configure prefixes in <b>Search Settings → Prefix Configuration → Manage Prefixes</b></li>
+            <li>Configure prefixes in <b>Search → Prefix Configuration → Manage Prefixes</b></li>
             <li>Use format: <code>[prefix] [search terms]</code></li>
             <li>Example: <code>cb 2ac</code> searches for "2ac" only in folders assigned to "cb" prefix (say, condo bad!)</li>
         </ol>
@@ -513,7 +530,7 @@ class HelpDialog(QDialog):
         <h3>Using Open Word Documents:</h3>
         <p>The <b>Send to Doc</b> menu shows currently open Word documents and provides document targeting options:
         <ol>
-            <li>Select a document from the menu to set it as the active target</li>
+            <li>Use <b>Select Target Doc...</b> or choose a document from the menu to set it as the active target</li>
             <li>Use <b>Default Paste Mode</b> to control where content is inserted:
                 <ul>
                     <li><b>Paste at Cursor:</b> Inserts at current cursor position</li>
@@ -521,7 +538,7 @@ class HelpDialog(QDialog):
                 </ul>
             </li>
             <li>Press <b>Ctrl+Enter</b> to use the alternate paste mode</li>
-            <li>Use <b>Clear Destination</b> to return to clipboard mode</li>
+            <li>Use <b>Clear Target Doc</b> to return to clipboard mode</li>
         </ol>
         """
         
